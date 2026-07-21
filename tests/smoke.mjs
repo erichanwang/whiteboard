@@ -88,8 +88,10 @@ try {
     throw new Error(`Blackboard dropdown colors are incorrect: ${JSON.stringify(blackboardSelectStyle)}`);
   }
   if (await page.locator(".tool-dock").evaluate((element) => getComputedStyle(element).boxShadow) !== "none") throw new Error("Tool dock still has an excessive shadow.");
-  await page.getByLabel("Pan action key").focus();
+  await page.getByLabel("Middle mouse key").focus();
   await page.keyboard.press("Shift");
+  await page.getByLabel("Left mouse key").focus();
+  await page.keyboard.press("a");
   await page.getByRole("button", { name: "Close settings" }).click();
 
   const viewXBeforeBoundPan = Number(await canvas.getAttribute("data-view-x"));
@@ -98,6 +100,20 @@ try {
   await page.mouse.move(box.x + 485, box.y + 300, { steps: 4 });
   await page.keyboard.up("Shift");
   if (Number(await canvas.getAttribute("data-view-x")) === viewXBeforeBoundPan) throw new Error("Bound pan key did not act like a mouse button.");
+
+  const strokesBeforeBoundLeft = await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.document.v1")).strokes.length);
+  await page.mouse.move(box.x + 520, box.y + 330);
+  await page.keyboard.down("a");
+  await page.mouse.move(box.x + 590, box.y + 390, { steps: 8 });
+  await page.keyboard.up("a");
+  const strokesAfterBoundLeft = await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.document.v1")).strokes.length);
+  if (strokesAfterBoundLeft !== strokesBeforeBoundLeft + 1) throw new Error("Bound left-mouse key did not use the current pen tool.");
+
+  await page.mouse.move(box.x + 500, box.y + 310);
+  await page.keyboard.down("x");
+  await page.mouse.move(box.x + 610, box.y + 410, { steps: 6 });
+  await page.keyboard.up("x");
+  if (Number(await canvas.getAttribute("data-selected-count")) < 1) throw new Error("Bound right-mouse key did not select ink.");
 
   await page.getByRole("button", { name: "Handwriting practice" }).click();
   const practice = page.getByRole("complementary", { name: "Handwriting practice" });
@@ -121,6 +137,10 @@ try {
 
   await page.reload({ waitUntil: "networkidle" });
   await page.getByLabel("Starting Whiteboard").waitFor({ state: "detached" });
+  const restoredBindings = await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.input.v1")));
+  if (restoredBindings.leftKey !== "a" || restoredBindings.middleKey !== "Shift" || restoredBindings.rightKey !== "x") {
+    throw new Error(`Mouse-key bindings did not persist: ${JSON.stringify(restoredBindings)}`);
+  }
   if (!(await page.locator("main").getAttribute("class"))?.includes("theme-black")) throw new Error("Blackboard preference did not persist after restart.");
   if ((await page.getByRole("button", { name: "Ink color #356f9f" }).getAttribute("aria-pressed")) !== "true") throw new Error("Pen color preference did not persist after restart.");
   await page.getByRole("button", { name: "Handwriting practice" }).click();
@@ -202,7 +222,7 @@ try {
   const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   if (horizontalOverflow) throw new Error("The app overflows horizontally at the minimum window width.");
 
-  console.log("Smoke test passed: timestamp naming, drawing/autosave, wheel zoom, mouse and bound-key pan/select, persisted board/tool/color/grid defaults, self-contained practice persistence, click-free mapped pad, text and LaTeX objects, embedded images, library fallback, recognition failure, and minimum-width layout.");
+  console.log("Smoke test passed: timestamp naming, drawing/autosave, wheel zoom, mouse and persistent left/middle/right key bindings, persisted board/tool/color/grid defaults, self-contained practice persistence, click-free mapped pad, text and LaTeX objects, embedded images, library fallback, recognition failure, and minimum-width layout.");
 } finally {
   await browser.close();
 }

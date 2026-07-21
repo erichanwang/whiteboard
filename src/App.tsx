@@ -71,7 +71,8 @@ const DEFAULT_SETTINGS: RecognitionSettings = {
 type SaveState = "saved" | "saving" | "error";
 type RecognitionState = "idle" | "loading" | "result" | "error";
 type RecognitionScope = "visible" | "selection" | "board";
-type InputBindings = { drawKey: string; panKey: string; selectKey: string };
+type InputBindings = { leftKey: string; middleKey: string; rightKey: string };
+type LegacyInputBindings = { drawKey: string; panKey: string; selectKey: string };
 type UiPreferences = {
   tool: Tool;
   color: string;
@@ -83,15 +84,18 @@ type UiPreferences = {
 type LibraryBoard = { id: string; title: string; updatedAt: string };
 type EncryptionRequest = { action: "save" | "open"; path: string; encrypted?: Uint8Array };
 
-const DEFAULT_INPUT_BINDINGS: InputBindings = { drawKey: "z", panKey: " ", selectKey: "x" };
+const DEFAULT_INPUT_BINDINGS: InputBindings = { leftKey: "z", middleKey: " ", rightKey: "x" };
 
 function loadInputBindings(): InputBindings {
   try {
-    const parsed = JSON.parse(localStorage.getItem(INPUT_STORAGE_KEY) ?? "null") as Partial<InputBindings> | null;
+    const parsed = JSON.parse(localStorage.getItem(INPUT_STORAGE_KEY) ?? "null") as (Partial<InputBindings> & Partial<LegacyInputBindings>) | null;
     return {
-      drawKey: typeof parsed?.drawKey === "string" && parsed.drawKey ? parsed.drawKey : DEFAULT_INPUT_BINDINGS.drawKey,
-      panKey: typeof parsed?.panKey === "string" && parsed.panKey ? parsed.panKey : DEFAULT_INPUT_BINDINGS.panKey,
-      selectKey: typeof parsed?.selectKey === "string" && parsed.selectKey ? parsed.selectKey : DEFAULT_INPUT_BINDINGS.selectKey,
+      leftKey: typeof parsed?.leftKey === "string" && parsed.leftKey ? parsed.leftKey
+        : typeof parsed?.drawKey === "string" && parsed.drawKey ? parsed.drawKey : DEFAULT_INPUT_BINDINGS.leftKey,
+      middleKey: typeof parsed?.middleKey === "string" && parsed.middleKey ? parsed.middleKey
+        : typeof parsed?.panKey === "string" && parsed.panKey ? parsed.panKey : DEFAULT_INPUT_BINDINGS.middleKey,
+      rightKey: typeof parsed?.rightKey === "string" && parsed.rightKey ? parsed.rightKey
+        : typeof parsed?.selectKey === "string" && parsed.selectKey ? parsed.selectKey : DEFAULT_INPUT_BINDINGS.rightKey,
     };
   } catch {
     return DEFAULT_INPUT_BINDINGS;
@@ -257,7 +261,7 @@ function App() {
   const practiceStrokesRef = useRef(practiceStrokes);
   const pressedKeys = useRef(new Set<string>());
   const canvasHover = useRef<{ clientX: number; clientY: number; point: Point } | null>(null);
-  const keyboardPointerAction = useRef<"draw" | "pan" | "select" | null>(null);
+  const keyboardPointerAction = useRef<"left" | "middle" | "right" | null>(null);
 
   boardRef.current = board;
   viewRef.current = view;
@@ -487,27 +491,20 @@ function App() {
         event.preventDefault();
         redo();
       } else if (!event.repeat && canvasHover.current && !keyboardPointerAction.current && !currentStroke.current && !dragOrigin.current && !selectionOrigin.current
-        && [inputBindings.drawKey, inputBindings.panKey, inputBindings.selectKey].includes(event.key)) {
+        && [inputBindings.leftKey, inputBindings.middleKey, inputBindings.rightKey].includes(event.key)) {
         event.preventDefault();
         const hover = canvasHover.current;
-        if (event.key === inputBindings.drawKey) {
-          keyboardPointerAction.current = "draw";
-          currentStroke.current = {
-            id: crypto.randomUUID(),
-            color,
-            width,
-            pointerType: "keyboard",
-            points: [hover.point],
-          };
-          setSelection(new Set());
-        } else if (event.key === inputBindings.panKey) {
-          keyboardPointerAction.current = "pan";
+        if (event.key === inputBindings.leftKey) {
+          keyboardPointerAction.current = "left";
+          beginPrimaryAction(hover.point, hover.clientX, hover.clientY, "keyboard");
+        } else if (event.key === inputBindings.middleKey) {
+          keyboardPointerAction.current = "middle";
           dragOrigin.current = {
             point: { x: hover.clientX, y: hover.clientY, pressure: 0.5, time: Date.now() },
             view: viewRef.current,
           };
         } else {
-          keyboardPointerAction.current = "select";
+          keyboardPointerAction.current = "right";
           selectionOrigin.current = hover.point;
           setSelection(new Set());
           setSelectionBox({ x: hover.point.x, y: hover.point.y, width: 0, height: 0 });
@@ -540,21 +537,10 @@ function App() {
     const onKeyUp = (event: KeyboardEvent) => {
       pressedKeys.current.delete(event.key);
       const action = keyboardPointerAction.current;
-      const expectedKey = action === "draw" ? inputBindings.drawKey : action === "pan" ? inputBindings.panKey : action === "select" ? inputBindings.selectKey : null;
+      const expectedKey = action === "left" ? inputBindings.leftKey : action === "middle" ? inputBindings.middleKey : action === "right" ? inputBindings.rightKey : null;
       if (!action || event.key !== expectedKey) return;
-      if (action === "draw" && currentStroke.current) {
-        const stroke = currentStroke.current;
-        currentStroke.current = null;
-        if (stroke.points.length > 1) commitBoard({ ...boardRef.current, strokes: [...boardRef.current.strokes, stroke] });
-      } else if (action === "select" && selectionOrigin.current && canvasHover.current) {
-        const start = selectionOrigin.current;
-        const end = canvasHover.current.point;
-        const bounds = { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), width: Math.abs(end.x - start.x), height: Math.abs(end.y - start.y) };
-        setSelection(selectedBoardIds(boardRef.current, bounds));
-        setSelectionBox(null);
-        selectionOrigin.current = null;
-      }
-      dragOrigin.current = null;
+      if (action !== "middle" && canvasHover.current) finishActiveAction(canvasHover.current.point);
+      else dragOrigin.current = null;
       keyboardPointerAction.current = null;
       redraw();
     };
@@ -564,11 +550,87 @@ function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [color, commitBoard, fitBoard, inputBindings, redo, redraw, undo, width, zoomBy]);
+  }, [color, commitBoard, fitBoard, inputBindings, redo, redraw, tool, undo, width, zoomBy]);
 
   function handleWheel(event: React.WheelEvent<HTMLCanvasElement>) {
     event.preventDefault();
     zoomAt(event.clientX, event.clientY, viewRef.current.scale * Math.exp(-event.deltaY * 0.004));
+  }
+
+  function beginPrimaryAction(point: Point, clientX: number, clientY: number, pointerType: string) {
+    if (tool === "pen") {
+      currentStroke.current = {
+        id: crypto.randomUUID(),
+        color,
+        width,
+        pointerType,
+        points: [point],
+      };
+      setSelection(new Set());
+    } else if (tool === "eraser") {
+      eraseOrigin.current = cloneBoard(boardRef.current);
+      eraseAt(point.x, point.y);
+    } else if (tool === "select") {
+      selectionOrigin.current = point;
+      setSelectionBox({ x: point.x, y: point.y, width: 0, height: 0 });
+    } else if (tool === "hand") {
+      dragOrigin.current = {
+        point: { ...point, x: clientX, y: clientY },
+        view: viewRef.current,
+      };
+    } else {
+      editTextAt(point);
+    }
+  }
+
+  function finishActiveAction(end: Point) {
+    if (currentStroke.current) {
+      const stroke = currentStroke.current;
+      currentStroke.current = null;
+      commitBoard({ ...boardRef.current, strokes: [...boardRef.current.strokes, stroke] });
+    } else if (eraseOrigin.current) {
+      const original = eraseOrigin.current;
+      eraseOrigin.current = null;
+      if (original.strokes.length !== boardRef.current.strokes.length) {
+        undoStack.current.push(original);
+        redoStack.current = [];
+        setBoard({ ...boardRef.current, updatedAt: new Date().toISOString() });
+      }
+    } else if (selectionOrigin.current) {
+      const start = selectionOrigin.current;
+      const bounds = {
+        x: Math.min(start.x, end.x),
+        y: Math.min(start.y, end.y),
+        width: Math.abs(end.x - start.x),
+        height: Math.abs(end.y - start.y),
+      };
+      setSelection(selectedBoardIds(boardRef.current, bounds));
+      selectionOrigin.current = null;
+      setSelectionBox(null);
+    }
+    dragOrigin.current = null;
+  }
+
+  function editTextAt(point: Point) {
+    const existing = [...boardRef.current.textObjects].reverse().find((item) =>
+      point.x >= item.x - 8 && point.x <= item.x + 280
+      && point.y >= item.y - 8 && point.y <= item.y + Math.max(28, item.value.split("\n").length * 28),
+    );
+    const value = window.prompt(existing ? "Edit text" : "Text to add", existing?.value ?? "");
+    if (!value?.trim()) return;
+    commitBoard({
+      ...boardRef.current,
+      textObjects: existing
+        ? boardRef.current.textObjects.map((item) => item.id === existing.id ? { ...item, value: value.trim() } : item)
+        : [...boardRef.current.textObjects, {
+          id: crypto.randomUUID(),
+          x: point.x,
+          y: point.y,
+          value: value.trim(),
+          color,
+          kind: "text",
+        }],
+    });
   }
 
   function startPointer(event: React.PointerEvent<HTMLCanvasElement>) {
@@ -609,59 +671,23 @@ function App() {
     }
 
     const point = boardPoint(event, viewRef.current);
-    if (tool === "pen") {
-      currentStroke.current = {
-        id: crypto.randomUUID(),
-        color,
-        width,
-        pointerType: event.pointerType,
-        points: [point],
-      };
-      setSelection(new Set());
-      redraw();
-    } else if (tool === "eraser") {
-      eraseOrigin.current = cloneBoard(boardRef.current);
-      eraseAt(point.x, point.y);
-    } else if (tool === "select") {
-      selectionOrigin.current = point;
-      setSelectionBox({ x: point.x, y: point.y, width: 0, height: 0 });
-    } else if (tool === "hand") {
-      dragOrigin.current = { point: { ...point, x: event.clientX, y: event.clientY }, view: viewRef.current };
-    } else {
-      const existing = [...boardRef.current.textObjects].reverse().find((item) =>
-        point.x >= item.x - 8 && point.x <= item.x + 280
-        && point.y >= item.y - 8 && point.y <= item.y + Math.max(28, item.value.split("\n").length * 28),
-      );
-      const value = window.prompt(existing ? "Edit text" : "Text to add", existing?.value ?? "");
-      if (value?.trim()) {
-        commitBoard({
-          ...boardRef.current,
-          textObjects: existing
-            ? boardRef.current.textObjects.map((item) => item.id === existing.id ? { ...item, value: value.trim() } : item)
-            : [...boardRef.current.textObjects, {
-              id: crypto.randomUUID(),
-              x: point.x,
-              y: point.y,
-              value: value.trim(),
-              color,
-              kind: "text",
-            }],
-        });
-      }
-    }
+    beginPrimaryAction(point, event.clientX, event.clientY, event.pointerType);
+    redraw();
   }
 
   function movePointer(event: React.PointerEvent<HTMLCanvasElement>) {
     const hoverPoint = boardPoint(event, viewRef.current);
     canvasHover.current = { clientX: event.clientX, clientY: event.clientY, point: hoverPoint };
     if (keyboardPointerAction.current) {
-      if (keyboardPointerAction.current === "draw" && currentStroke.current) {
+      if (keyboardPointerAction.current === "left" && currentStroke.current) {
         currentStroke.current.points.push(hoverPoint);
         redraw();
-      } else if (keyboardPointerAction.current === "select" && selectionOrigin.current) {
+      } else if (keyboardPointerAction.current === "left" && eraseOrigin.current) {
+        eraseAt(hoverPoint.x, hoverPoint.y);
+      } else if ((keyboardPointerAction.current === "left" || keyboardPointerAction.current === "right") && selectionOrigin.current) {
         const start = selectionOrigin.current;
         setSelectionBox({ x: Math.min(start.x, hoverPoint.x), y: Math.min(start.y, hoverPoint.y), width: Math.abs(hoverPoint.x - start.x), height: Math.abs(hoverPoint.y - start.y) });
-      } else if (keyboardPointerAction.current === "pan" && dragOrigin.current) {
+      } else if ((keyboardPointerAction.current === "left" || keyboardPointerAction.current === "middle") && dragOrigin.current) {
         setView({
           ...dragOrigin.current.view,
           x: dragOrigin.current.view.x + event.clientX - dragOrigin.current.point.x,
@@ -718,33 +744,7 @@ function App() {
   function endPointer(event: React.PointerEvent<HTMLCanvasElement>) {
     pointerPositions.current.delete(event.pointerId);
     if (pointerPositions.current.size < 2) pinchOrigin.current = null;
-
-    if (currentStroke.current) {
-      const stroke = currentStroke.current;
-      currentStroke.current = null;
-      commitBoard({ ...boardRef.current, strokes: [...boardRef.current.strokes, stroke] });
-    } else if (eraseOrigin.current) {
-      const original = eraseOrigin.current;
-      eraseOrigin.current = null;
-      if (original.strokes.length !== boardRef.current.strokes.length) {
-        undoStack.current.push(original);
-        redoStack.current = [];
-        setBoard({ ...boardRef.current, updatedAt: new Date().toISOString() });
-      }
-    } else if (selectionOrigin.current) {
-      const end = boardPoint(event, viewRef.current);
-      const start = selectionOrigin.current;
-      const bounds = {
-        x: Math.min(start.x, end.x),
-        y: Math.min(start.y, end.y),
-        width: Math.abs(end.x - start.x),
-        height: Math.abs(end.y - start.y),
-      };
-      setSelection(selectedBoardIds(boardRef.current, bounds));
-      selectionOrigin.current = null;
-      setSelectionBox(null);
-    }
-    dragOrigin.current = null;
+    finishActiveAction(boardPoint(event, viewRef.current));
   }
 
   function cancelPointer(event: React.PointerEvent<HTMLCanvasElement>) {
@@ -1689,45 +1689,45 @@ function App() {
             </div>
             <div className="settings-section">
               <h3>Input bindings</h3>
-              <p>Osu-style controls: hold a bound key while moving the cursor over the canvas. The key itself acts as the mouse button.</p>
+              <p>Osu-style controls: hold a bound key while moving the cursor over the canvas. Each key behaves like its matching mouse button.</p>
               <div className="binding-grid">
                 <label className="field">
-                  <span>Draw key</span>
+                  <span>Left mouse key</span>
                   <input
                     readOnly
-                    value={keyLabel(inputBindings.drawKey)}
+                    value={keyLabel(inputBindings.leftKey)}
                     onKeyDown={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      setInputBinding("drawKey", event.key);
+                      setInputBinding("leftKey", event.key);
                     }}
-                    aria-label="Draw action key"
+                    aria-label="Left mouse key"
                   />
                 </label>
                 <label className="field">
-                  <span>Pan key</span>
+                  <span>Middle mouse key</span>
                   <input
                     readOnly
-                    value={keyLabel(inputBindings.panKey)}
+                    value={keyLabel(inputBindings.middleKey)}
                     onKeyDown={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      setInputBinding("panKey", event.key);
+                      setInputBinding("middleKey", event.key);
                     }}
-                    aria-label="Pan action key"
+                    aria-label="Middle mouse key"
                   />
                 </label>
                 <label className="field">
-                  <span>Select key</span>
+                  <span>Right mouse key</span>
                   <input
                     readOnly
-                    value={keyLabel(inputBindings.selectKey)}
+                    value={keyLabel(inputBindings.rightKey)}
                     onKeyDown={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      setInputBinding("selectKey", event.key);
+                      setInputBinding("rightKey", event.key);
                     }}
-                    aria-label="Select action key"
+                    aria-label="Right mouse key"
                   />
                 </label>
               </div>

@@ -2,7 +2,8 @@
 name = "whiteboard"
 version = "0.1.0"
 description = "A local-first whiteboard for mouse, touch, and stylus input"
-authors = ["Eric Wang"]
+authors = ["erichanwang"]
+license = "MIT"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

@@ -1,89 +1,94 @@
 # Whiteboard
 
-A local-first Tauri whiteboard for Ubuntu. It supports mouse, touch, stylus pressure, whiteboard and blackboard themes, a subtle grid, vector undo/redo, selection, panning, cursor-centered zoom, native project files, PNG export, and autosave.
+I wanted a whiteboard that opens quickly, feels at home on Ubuntu, and does not turn every note into a cloud account. This is that app: a small Tauri whiteboard for a mouse, touchscreen, stylus, or trackpad.
 
-Mouse controls:
+It is intentionally simple. Draw, erase, zoom, pan, drop in an image, add text or LaTeX, and get back to the work in front of you. Boards autosave locally and can also be opened or saved with the normal system file picker.
 
-- Left drag: draw with the current tool
-- Middle drag: pan regardless of the selected tool
-- Right drag: select strokes regardless of the selected tool
-- Wheel, two-finger scroll, or pinch: zoom around the cursor
-- Hold configurable Draw, Pan, or Select keys while moving the cursor for osu-style button-free input
+## What is in the first release
 
-The Text tool inserts a text box at the clicked board position. Click an existing text box with the Text tool to edit it. The top bar can also embed a local PNG, JPEG, or WebP image and insert a KaTeX-rendered LaTeX object at the visible board center. Embedded images stay inside the board document rather than retaining a local file path.
+- Whiteboard and blackboard themes with a light optional grid
+- Pressure-aware mouse, touch, and stylus drawing
+- Cursor-centered wheel and pinch zoom
+- Middle-button panning and right-button selection
+- Persistent keyboard substitutes for left, middle, and right mouse buttons
+- A click-free Trackpad Pad that maps directly onto the visible board
+- Text boxes, rendered LaTeX, and embedded PNG, JPEG, or WebP images
+- Undo, redo, PNG export, native project files, and a local board library
+- Password-encrypted board snapshots
+- Guided handwriting practice and optional text or LaTeX recognition
 
-New boards keep the last board theme, grid, tool, ink color, pen width, and click-free Trackpad Pad preference.
+New boards remember the theme, grid, current tool, ink color, pen width, Trackpad Pad mode, and mouse-button key bindings you used last.
 
-## Board Library and files
+## Controls
 
-New boards receive a sortable local date-time name. The native Board Library autosaves each board as a private JSON file in Tauri's application-data directory. Library directories use `0700` permissions and board files use `0600` on Linux.
+| Input | Action |
+| --- | --- |
+| Left drag | Use the current tool |
+| Middle drag | Pan |
+| Right drag | Select |
+| Wheel or two-finger scroll | Zoom around the pointer |
+| Pinch | Zoom around the gesture |
+| `P`, `E`, `V`, `H`, `T` | Pen, eraser, select, hand, and text tools |
+| `[` / `]` | Change pen width |
+| `0` | Reset the view |
 
-`Open`, `Save`, and PNG export use native system file dialogs for files outside the library. Board data and handwriting samples are never stored in this repository.
+The default mouse-button keys are `Z` for left, `Space` for middle, and `X` for right. Change them under Recognition settings -> Input bindings. Hold a key and move the pointer over the canvas, much like an osu-style input setup. The bindings are saved locally.
 
-`Save encrypted board` creates a password-protected `.whiteboard.enc` snapshot using Argon2id with a 64 MiB memory cost and AES-256-GCM authenticated encryption. The passphrase is never stored. The private autosave library remains a separate plaintext recovery copy.
+## Boards and privacy
 
-## Recognition
+The native Board Library stores boards in Tauri's application-data directory. On Linux, library directories use `0700` permissions and board files use `0600`. Images are embedded in the board document, so a saved board does not retain the original image path.
 
-Recognition uses the NVIDIA NIM API. The native Rust layer reads `NVIDIA_NIM_API_KEY` from the process environment or `~/.fcc/.env`; the credential is never returned to the React interface or saved in board files.
+`Save encrypted board` creates a `.whiteboard.enc` snapshot protected with Argon2id and AES-256-GCM. The passphrase is not stored. The automatic library copy is separate and remains plaintext so it can act as local recovery.
 
-Recognition defaults to the currently visible grid-aligned area for smaller, faster requests. The panel can switch to selected ink or the entire board. Text and LaTeX results remain editable and never replace the original ink automatically.
+No credentials, `.env` files, board documents, or handwriting samples belong in this repository. They are excluded by `.gitignore` and are checked before a release is published.
 
-The handwriting profile stores up to 240 labeled samples and 100 corrections locally. Guided exercises cover lowercase and uppercase letters, digits, words, punctuation, and math symbols. Balanced recent examples are sent to the vision model; this is reference-based personalization, not neural-network fine-tuning.
+## Handwriting recognition
 
-## Trackpad Pad
+Recognition is optional. The native Rust process reads `NVIDIA_NIM_API_KEY` from the process environment or your local `~/.fcc/.env`; the key is never sent to the React interface or written into a board.
 
-`Trackpad Pad` maps positions inside its on-screen writing area edge-to-edge onto the visible board. Press and drag, or enable click-free writing and move the cursor through the pad without clicking.
+Recognition starts with the visible, grid-aligned area because that is usually the fastest useful scope. You can switch to selected ink or the whole board. Results stay editable and never replace the original writing automatically.
 
-Ubuntu and Wayland do not expose raw absolute touch-contact coordinates to a normal webview. A true no-click physical-touchpad mode would require a Rust evdev/libinput reader and a one-time, device-specific OS permission rule. The app does not run as root or silently broaden input-device access.
+The practice screen collects labeled examples for letters, numbers, punctuation, words, and common math symbols. These examples guide the recognition request; this is personalization by reference, not local model fine-tuning.
 
-## Ubuntu setup
+## Run it on Ubuntu
 
-Install Tauri's Linux build requirements:
+Install the Tauri build requirements:
 
 ```bash
 sudo apt update
 sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev pkg-config libdbus-1-dev
 ```
 
-Then run:
+Then install dependencies and start the app:
 
 ```bash
 npm install
 npm run tauri dev
 ```
 
-Build an installable package with:
+Build the Debian package with:
 
 ```bash
 npm run tauri build -- --bundles deb
 ```
 
-## Verification
+## Tests
+
+Start the Vite server in one terminal:
+
+```bash
+npm run dev -- --host 127.0.0.1
+```
+
+Then run the build and browser-level smoke test:
 
 ```bash
 npm run build
-npm run dev -- --host 127.0.0.1
 npm run test:e2e
 ```
 
-## Feature backlog
+The first release is focused on a dependable local canvas. It does not include cloud sync, collaboration, or a background service that reads raw Linux input devices.
 
-- SVG and PDF export
-- Shapes and line snapping
-- Image and PDF backgrounds
-- Multiple pages and version history
-- Search across recognized notes
-- Handwriting to Markdown or tasks
-- Formula alignment, matrices, and equation numbering
-- Presentation mode
-- Optional real model fine-tuning with held-out accuracy evaluation
+## License
 
-Cloud sync, real-time collaboration, and an infinite canvas are intentionally outside the first release.
-
-## Desktop launcher
-
-The user-level application entry can use the generated icon in `src-tauri/icons/icon.png` and the portable `scripts/launch.sh` launcher.
-
-## Privacy
-
-Credentials are read at runtime and are never embedded in the frontend or board files. `.env` files, private keys, generated builds, logs, native board files, and application data are excluded by `.gitignore`.
+MIT. See [LICENSE](LICENSE).
