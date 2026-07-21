@@ -3,6 +3,7 @@ import {
   ArrowClockwise,
   ArrowsOutSimple,
   Books,
+  Broom,
   Chalkboard,
   Check,
   DownloadSimple,
@@ -45,6 +46,7 @@ import {
   parseBoard,
   pointHitsStroke,
   renderSelectionImage,
+  textObjectBounds,
 } from "./board";
 import { listNvidiaModels, recognizeInk } from "./recognition";
 import { PRACTICE_SETS, practiceCount, practiceLabel } from "./practice";
@@ -71,31 +73,38 @@ const DEFAULT_SETTINGS: RecognitionSettings = {
 type SaveState = "saved" | "saving" | "error";
 type RecognitionState = "idle" | "loading" | "result" | "error";
 type RecognitionScope = "visible" | "selection" | "board";
-type InputBindings = { leftKey: string; middleKey: string; rightKey: string };
-type LegacyInputBindings = { drawKey: string; panKey: string; selectKey: string };
+type InputBindings = { leftKeys: string[]; middleKeys: string[]; rightKeys: string[] };
+type LegacyInputBindings = {
+  leftKey: string;
+  middleKey: string;
+  rightKey: string;
+  drawKey: string;
+  panKey: string;
+  selectKey: string;
+};
 type UiPreferences = {
   tool: Tool;
   color: string;
   width: number;
-  trackpadHoverDraw: boolean;
   theme: BoardDocument["theme"];
   grid: boolean;
 };
 type LibraryBoard = { id: string; title: string; updatedAt: string };
 type EncryptionRequest = { action: "save" | "open"; path: string; encrypted?: Uint8Array };
 
-const DEFAULT_INPUT_BINDINGS: InputBindings = { leftKey: "z", middleKey: " ", rightKey: "x" };
+const DEFAULT_INPUT_BINDINGS: InputBindings = { leftKeys: ["z"], middleKeys: [" "], rightKeys: ["x"] };
+
+function storedKeys(value: unknown, fallback: string[]) {
+  return Array.isArray(value) ? value.filter((key): key is string => typeof key === "string" && key.length > 0 && key.toLowerCase() !== "m") : fallback;
+}
 
 function loadInputBindings(): InputBindings {
   try {
     const parsed = JSON.parse(localStorage.getItem(INPUT_STORAGE_KEY) ?? "null") as (Partial<InputBindings> & Partial<LegacyInputBindings>) | null;
     return {
-      leftKey: typeof parsed?.leftKey === "string" && parsed.leftKey ? parsed.leftKey
-        : typeof parsed?.drawKey === "string" && parsed.drawKey ? parsed.drawKey : DEFAULT_INPUT_BINDINGS.leftKey,
-      middleKey: typeof parsed?.middleKey === "string" && parsed.middleKey ? parsed.middleKey
-        : typeof parsed?.panKey === "string" && parsed.panKey ? parsed.panKey : DEFAULT_INPUT_BINDINGS.middleKey,
-      rightKey: typeof parsed?.rightKey === "string" && parsed.rightKey ? parsed.rightKey
-        : typeof parsed?.selectKey === "string" && parsed.selectKey ? parsed.selectKey : DEFAULT_INPUT_BINDINGS.rightKey,
+      leftKeys: storedKeys(parsed?.leftKeys, [parsed?.leftKey ?? parsed?.drawKey ?? DEFAULT_INPUT_BINDINGS.leftKeys[0]]),
+      middleKeys: storedKeys(parsed?.middleKeys, [parsed?.middleKey ?? parsed?.panKey ?? DEFAULT_INPUT_BINDINGS.middleKeys[0]]),
+      rightKeys: storedKeys(parsed?.rightKeys, [parsed?.rightKey ?? parsed?.selectKey ?? DEFAULT_INPUT_BINDINGS.rightKeys[0]]),
     };
   } catch {
     return DEFAULT_INPUT_BINDINGS;
@@ -114,12 +123,11 @@ function loadUiPreferences(): UiPreferences {
       tool: tools.includes(parsed?.tool as Tool) ? parsed?.tool as Tool : "pen",
       color: typeof parsed?.color === "string" ? parsed.color : "auto",
       width: typeof parsed?.width === "number" ? Math.min(18, Math.max(1, parsed.width)) : 4,
-      trackpadHoverDraw: parsed?.trackpadHoverDraw === true,
       theme: parsed?.theme === "black" ? "black" : "white",
       grid: parsed?.grid !== false,
     };
   } catch {
-    return { tool: "pen", color: "auto", width: 4, trackpadHoverDraw: false, theme: "white", grid: true };
+    return { tool: "pen", color: "auto", width: 4, theme: "white", grid: true };
   }
 }
 
@@ -181,6 +189,11 @@ function selectedBoardIds(board: BoardDocument, bounds: Bounds) {
       item.x <= bounds.x + bounds.width && item.x + item.width >= bounds.x
       && item.y <= bounds.y + bounds.height && item.y + item.height >= bounds.y
     )).map((item) => item.id),
+    ...board.textObjects.filter((item) => {
+      const itemBounds = textObjectBounds(item);
+      return itemBounds.x <= bounds.x + bounds.width && itemBounds.x + itemBounds.width >= bounds.x
+        && itemBounds.y <= bounds.y + bounds.height && itemBounds.y + itemBounds.height >= bounds.y;
+    }).map((item) => item.id),
   ]);
 }
 
@@ -218,13 +231,14 @@ function App() {
   const [recognitionResult, setRecognitionResult] = useState("");
   const [recognitionOriginal, setRecognitionOriginal] = useState("");
   const [recognitionError, setRecognitionError] = useState("");
+  const [correctionMessage, setCorrectionMessage] = useState("");
   const [practiceOpen, setPracticeOpen] = useState(false);
   const [practiceSetId, setPracticeSetId] = useState(PRACTICE_SETS[0].id);
   const [practiceIndex, setPracticeIndex] = useState(0);
   const [practiceMessage, setPracticeMessage] = useState("");
   const [practiceStrokes, setPracticeStrokes] = useState<Stroke[]>([]);
   const [trackpadOpen, setTrackpadOpen] = useState(false);
-  const [trackpadHoverDraw, setTrackpadHoverDraw] = useState(() => loadUiPreferences().trackpadHoverDraw);
+  const [mousepadCursor, setMousepadCursor] = useState<{ x: number; y: number } | null>(null);
   const [inputBindings, setInputBindings] = useState(loadInputBindings);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [libraryBoards, setLibraryBoards] = useState<LibraryBoard[]>([]);
@@ -255,7 +269,7 @@ function App() {
     view: { x: number; y: number; scale: number };
   } | null>(null);
   const fileWriteChain = useRef<Promise<void>>(Promise.resolve());
-  const mappedPointerId = useRef<number | null>(null);
+  const mousepadCursorRef = useRef<{ x: number; y: number } | null>(null);
   const practicePointerId = useRef<number | null>(null);
   const currentPracticeStroke = useRef<Stroke | null>(null);
   const practiceStrokesRef = useRef(practiceStrokes);
@@ -427,11 +441,10 @@ function App() {
       tool,
       color,
       width,
-      trackpadHoverDraw,
       theme: board.theme,
       grid: board.grid,
     } satisfies UiPreferences));
-  }, [tool, color, width, trackpadHoverDraw, board.theme, board.grid]);
+  }, [tool, color, width, board.theme, board.grid]);
 
   const commitBoard = useCallback((next: BoardDocument) => {
     undoStack.current.push(cloneBoard(boardRef.current));
@@ -444,7 +457,7 @@ function App() {
     const previous = undoStack.current.pop();
     if (!previous) return;
     redoStack.current.push(cloneBoard(boardRef.current));
-    setBoard(previous);
+    setBoard({ ...previous, updatedAt: new Date().toISOString() });
     setSelection(new Set());
   }, []);
 
@@ -452,9 +465,76 @@ function App() {
     const next = redoStack.current.pop();
     if (!next) return;
     undoStack.current.push(cloneBoard(boardRef.current));
-    setBoard(next);
+    setBoard({ ...next, updatedAt: new Date().toISOString() });
     setSelection(new Set());
   }, []);
+
+  function updateBoardMetadata(update: (current: BoardDocument) => BoardDocument) {
+    redoStack.current = [];
+    setBoard((current) => ({ ...update(current), updatedAt: new Date().toISOString() }));
+  }
+
+  const deleteSelection = useCallback(() => {
+    if (!selectionRef.current.size) return;
+    commitBoard({
+      ...boardRef.current,
+      strokes: boardRef.current.strokes.filter((stroke) => !selectionRef.current.has(stroke.id)),
+      textObjects: boardRef.current.textObjects.filter((item) => !selectionRef.current.has(item.id)),
+      imageObjects: boardRef.current.imageObjects.filter((item) => !selectionRef.current.has(item.id)),
+    });
+    setSelection(new Set());
+  }, [commitBoard]);
+
+  const finishMousepadStroke = useCallback(() => {
+    const stroke = currentStroke.current;
+    if (!stroke || stroke.pointerType !== "mousepad-capture") return;
+    currentStroke.current = null;
+    if (stroke.points.length > 1) commitBoard({ ...boardRef.current, strokes: [...boardRef.current.strokes, stroke] });
+    else redraw();
+  }, [commitBoard, redraw]);
+
+  function stopMousepadCapture() {
+    finishMousepadStroke();
+    if (document.pointerLockElement) document.exitPointerLock();
+    setTrackpadOpen(false);
+    setMousepadCursor(null);
+    mousepadCursorRef.current = null;
+  }
+
+  function toggleMousepadCapture() {
+    if (trackpadOpen || document.pointerLockElement === canvasRef.current) {
+      stopMousepadCapture();
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const hover = canvasHover.current;
+    const cursor = hover
+      ? { x: Math.min(rect.width, Math.max(0, hover.clientX - rect.left)), y: Math.min(rect.height, Math.max(0, hover.clientY - rect.top)) }
+      : { x: rect.width / 2, y: rect.height / 2 };
+    mousepadCursorRef.current = cursor;
+    setMousepadCursor(cursor);
+    canvas.requestPointerLock().catch(() => {
+      setTrackpadOpen(false);
+      setMousepadCursor(null);
+      mousepadCursorRef.current = null;
+    });
+  }
+
+  useEffect(() => {
+    const onPointerLockChange = () => {
+      const active = document.pointerLockElement === canvasRef.current;
+      setTrackpadOpen(active);
+      if (!active) {
+        finishMousepadStroke();
+        setMousepadCursor(null);
+        mousepadCursorRef.current = null;
+      }
+    };
+    document.addEventListener("pointerlockchange", onPointerLockChange);
+    return () => document.removeEventListener("pointerlockchange", onPointerLockChange);
+  }, [finishMousepadStroke]);
 
   const fitBoard = useCallback(() => setView({ x: 0, y: 0, scale: 1 }), []);
 
@@ -490,14 +570,17 @@ function App() {
       } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") {
         event.preventDefault();
         redo();
+      } else if (!event.repeat && event.key.toLowerCase() === "m") {
+        event.preventDefault();
+        toggleMousepadCapture();
       } else if (!event.repeat && canvasHover.current && !keyboardPointerAction.current && !currentStroke.current && !dragOrigin.current && !selectionOrigin.current
-        && [inputBindings.leftKey, inputBindings.middleKey, inputBindings.rightKey].includes(event.key)) {
+        && [...inputBindings.leftKeys, ...inputBindings.middleKeys, ...inputBindings.rightKeys].includes(event.key)) {
         event.preventDefault();
         const hover = canvasHover.current;
-        if (event.key === inputBindings.leftKey) {
+        if (inputBindings.leftKeys.includes(event.key)) {
           keyboardPointerAction.current = "left";
           beginPrimaryAction(hover.point, hover.clientX, hover.clientY, "keyboard");
-        } else if (event.key === inputBindings.middleKey) {
+        } else if (inputBindings.middleKeys.includes(event.key)) {
           keyboardPointerAction.current = "middle";
           dragOrigin.current = {
             point: { x: hover.clientX, y: hover.clientY, pressure: 0.5, time: Date.now() },
@@ -524,21 +607,17 @@ function App() {
         setSelection(new Set());
         setRecognitionOpen(false);
         setPracticeOpen(false);
-        setTrackpadOpen(false);
+        stopMousepadCapture();
       } else if (event.key === "Delete" && selectionRef.current.size) {
-        commitBoard({
-          ...boardRef.current,
-          strokes: boardRef.current.strokes.filter((stroke) => !selectionRef.current.has(stroke.id)),
-          imageObjects: boardRef.current.imageObjects.filter((item) => !selectionRef.current.has(item.id)),
-        });
-        setSelection(new Set());
+        deleteSelection();
       }
     };
     const onKeyUp = (event: KeyboardEvent) => {
       pressedKeys.current.delete(event.key);
       const action = keyboardPointerAction.current;
-      const expectedKey = action === "left" ? inputBindings.leftKey : action === "middle" ? inputBindings.middleKey : action === "right" ? inputBindings.rightKey : null;
-      if (!action || event.key !== expectedKey) return;
+      const expectedKeys = action === "left" ? inputBindings.leftKeys : action === "middle" ? inputBindings.middleKeys : action === "right" ? inputBindings.rightKeys : [];
+      if (!action || !expectedKeys.includes(event.key)) return;
+      if (expectedKeys.some((key) => pressedKeys.current.has(key))) return;
       if (action !== "middle" && canvasHover.current) finishActiveAction(canvasHover.current.point);
       else dragOrigin.current = null;
       keyboardPointerAction.current = null;
@@ -550,7 +629,7 @@ function App() {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [color, commitBoard, fitBoard, inputBindings, redo, redraw, tool, undo, width, zoomBy]);
+  }, [color, commitBoard, deleteSelection, fitBoard, inputBindings, redo, redraw, tool, trackpadOpen, undo, width, zoomBy]);
 
   function handleWheel(event: React.WheelEvent<HTMLCanvasElement>) {
     event.preventDefault();
@@ -593,6 +672,7 @@ function App() {
       eraseOrigin.current = null;
       if (original.strokes.length !== boardRef.current.strokes.length) {
         undoStack.current.push(original);
+        if (undoStack.current.length > 80) undoStack.current.shift();
         redoStack.current = [];
         setBoard({ ...boardRef.current, updatedAt: new Date().toISOString() });
       }
@@ -678,6 +758,36 @@ function App() {
   function movePointer(event: React.PointerEvent<HTMLCanvasElement>) {
     const hoverPoint = boardPoint(event, viewRef.current);
     canvasHover.current = { clientX: event.clientX, clientY: event.clientY, point: hoverPoint };
+    if (trackpadOpen && document.pointerLockElement === event.currentTarget) {
+      const rect = event.currentTarget.getBoundingClientRect();
+      const previous = mousepadCursorRef.current ?? { x: rect.width / 2, y: rect.height / 2 };
+      const cursor = {
+        x: Math.min(rect.width, Math.max(0, previous.x + event.movementX)),
+        y: Math.min(rect.height, Math.max(0, previous.y + event.movementY)),
+      };
+      mousepadCursorRef.current = cursor;
+      setMousepadCursor(cursor);
+      const point: Point = {
+        x: (cursor.x - viewRef.current.x) / viewRef.current.scale,
+        y: (cursor.y - viewRef.current.y) / viewRef.current.scale,
+        pressure: 0.5,
+        time: Date.now(),
+      };
+      if (!currentStroke.current) {
+        currentStroke.current = {
+          id: crypto.randomUUID(),
+          color,
+          width,
+          pointerType: "mousepad-capture",
+          points: [point],
+        };
+        setSelection(new Set());
+      } else if (currentStroke.current.pointerType === "mousepad-capture") {
+        currentStroke.current.points.push(point);
+      }
+      redraw();
+      return;
+    }
     if (keyboardPointerAction.current) {
       if (keyboardPointerAction.current === "left" && currentStroke.current) {
         currentStroke.current.points.push(hoverPoint);
@@ -757,19 +867,17 @@ function App() {
     redraw();
   }
 
-  async function saveBoard(saveAs = false) {
+  async function saveBoard() {
     try {
-      let path = filePath;
-      if (saveAs || !path) {
-        path = await save({ defaultPath: `${board.title || defaultBoardTitle()}.whiteboard.json`, filters: [{ name: "Whiteboard", extensions: ["json"] }] });
-      }
-      if (!path) return;
       const formatted = JSON.stringify(board, null, 2);
-      fileWriteChain.current = fileWriteChain.current
-        .catch(() => undefined)
-        .then(() => writeTextFile(path, formatted));
-      await fileWriteChain.current;
-      setFilePath(path);
+      if (filePath) {
+        fileWriteChain.current = fileWriteChain.current
+          .catch(() => undefined)
+          .then(() => writeTextFile(filePath, formatted));
+        await fileWriteChain.current;
+      }
+      if (isTauri()) await invoke("save_library_board", { boardJson: formatted, boardId: board.id });
+      else localStorage.setItem(BOARD_STORAGE_KEY, JSON.stringify(board));
       setSaveState("saved");
     } catch (error) {
       setSaveState("error");
@@ -1019,6 +1127,7 @@ function App() {
     setRecognitionOpen(true);
     setRecognitionMode(mode);
     setRecognitionScope(scope);
+    setCorrectionMessage("");
     if (!rendered) {
       setRecognitionState("error");
       setRecognitionError(scope === "selection" ? "Select some ink first." : "There is no ink in this recognition area.");
@@ -1058,6 +1167,7 @@ function App() {
 
   function rememberCorrection() {
     if (!recognitionResult.trim() || recognitionResult.trim() === recognitionOriginal.trim()) return;
+    const corrected = recognitionResult.trim();
     setSettings((current) => ({
       ...current,
       corrections: [
@@ -1066,11 +1176,13 @@ function App() {
           id: crypto.randomUUID(),
           mode: recognitionMode,
           original: recognitionOriginal.trim(),
-          corrected: recognitionResult.trim(),
+          corrected,
           createdAt: new Date().toISOString(),
         },
       ].slice(-100),
     }));
+    setRecognitionOriginal(corrected);
+    setCorrectionMessage("Correction saved. It will be included with future recognition requests.");
   }
 
   function addCalibrationSample() {
@@ -1166,100 +1278,19 @@ function App() {
     return !practiceStrokes.length || window.confirm("Discard the handwriting currently in the practice pad?");
   }
 
-  function setInputBinding(binding: keyof InputBindings, key: string) {
-    if (!key) return;
+  function updateInputBinding(binding: keyof InputBindings, key: string) {
     setInputBindings((current) => {
-      const conflict = (Object.keys(current) as (keyof InputBindings)[]).find((candidate) => candidate !== binding && current[candidate] === key);
-      return conflict
-        ? { ...current, [binding]: key, [conflict]: current[binding] }
-        : { ...current, [binding]: key };
+      if (key === "Backspace") return { ...current, [binding]: current[binding].slice(0, -1) };
+      if (key === "Delete") return { ...current, [binding]: [] };
+      if (!key || key.toLowerCase() === "m" || current[binding].includes(key)) return current;
+      const next = Object.fromEntries(
+        (Object.keys(current) as (keyof InputBindings)[]).map((candidate) => [
+          candidate,
+          candidate === binding ? [...current[candidate], key] : current[candidate].filter((item) => item !== key),
+        ]),
+      ) as InputBindings;
+      return next;
     });
-  }
-
-  function mappedPadPoint(event: React.PointerEvent<HTMLDivElement>): Point | null {
-    const canvas = canvasRef.current;
-    if (!canvas) return null;
-    const pad = event.currentTarget.getBoundingClientRect();
-    const canvasRect = canvas.getBoundingClientRect();
-    const normalizedX = Math.min(1, Math.max(0, (event.clientX - pad.left) / pad.width));
-    const normalizedY = Math.min(1, Math.max(0, (event.clientY - pad.top) / pad.height));
-    const screenX = normalizedX * canvasRect.width;
-    const screenY = normalizedY * canvasRect.height;
-    return {
-      x: (screenX - viewRef.current.x) / viewRef.current.scale,
-      y: (screenY - viewRef.current.y) / viewRef.current.scale,
-      pressure: event.pressure > 0 ? event.pressure : 0.5,
-      time: Date.now(),
-    };
-  }
-
-  function startMappedPad(event: React.PointerEvent<HTMLDivElement>) {
-    if (trackpadHoverDraw && event.pointerType === "mouse") return;
-    if (event.button !== 0 || mappedPointerId.current !== null || currentStroke.current) return;
-    const point = mappedPadPoint(event);
-    if (!point) return;
-    event.preventDefault();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    mappedPointerId.current = event.pointerId;
-    currentStroke.current = {
-      id: crypto.randomUUID(),
-      color,
-      width,
-      pointerType: "trackpad-pad",
-      points: [point],
-    };
-    redraw();
-  }
-
-  function moveMappedPad(event: React.PointerEvent<HTMLDivElement>) {
-    if (trackpadHoverDraw && event.pointerType === "mouse" && event.buttons === 0) {
-      const point = mappedPadPoint(event);
-      if (!point) return;
-      if (!currentStroke.current) {
-        mappedPointerId.current = event.pointerId;
-        currentStroke.current = {
-          id: crypto.randomUUID(),
-          color,
-          width,
-          pointerType: "trackpad-pad-hover",
-          points: [point],
-        };
-      } else if (mappedPointerId.current === event.pointerId) {
-        currentStroke.current.points.push(point);
-      }
-      redraw();
-      return;
-    }
-    if (mappedPointerId.current !== event.pointerId || !currentStroke.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-    event.preventDefault();
-    const point = mappedPadPoint(event);
-    if (!point) return;
-    currentStroke.current.points.push(point);
-    redraw();
-  }
-
-  function endMappedPad(event: React.PointerEvent<HTMLDivElement>) {
-    if (mappedPointerId.current !== event.pointerId || !currentStroke.current || !event.currentTarget.hasPointerCapture(event.pointerId)) return;
-    const stroke = currentStroke.current;
-    currentStroke.current = null;
-    mappedPointerId.current = null;
-    commitBoard({ ...boardRef.current, strokes: [...boardRef.current.strokes, stroke] });
-  }
-
-  function cancelMappedPad(event: React.PointerEvent<HTMLDivElement>) {
-    if (mappedPointerId.current !== event.pointerId) return;
-    currentStroke.current = null;
-    mappedPointerId.current = null;
-    redraw();
-  }
-
-  function endHoverMappedPad(event: React.PointerEvent<HTMLDivElement>) {
-    if (!trackpadHoverDraw || mappedPointerId.current !== event.pointerId || !currentStroke.current) return;
-    const stroke = currentStroke.current;
-    currentStroke.current = null;
-    mappedPointerId.current = null;
-    if (stroke.points.length > 1) commitBoard({ ...boardRef.current, strokes: [...boardRef.current.strokes, stroke] });
-    else redraw();
   }
 
   const latexPreview = useMemo(() => {
@@ -1281,13 +1312,13 @@ function App() {
           <IconButton label="New board" onClick={newBoard}><FilePlus /></IconButton>
           <IconButton label="Board Library" onClick={openLibrary}><Books /></IconButton>
           <IconButton label="Open board" onClick={openBoard}><ArrowsOutSimple /></IconButton>
-          <IconButton label="Save board" onClick={() => saveBoard()}><FloppyDisk /></IconButton>
+          <IconButton label="Save to Board Library" onClick={saveBoard}><FloppyDisk /></IconButton>
           <IconButton label="Save encrypted board" onClick={saveEncryptedBoard}><LockKey /></IconButton>
           <input
             className="board-title"
             aria-label="Board title"
             value={board.title}
-            onChange={(event) => setBoard((current) => ({ ...current, title: event.target.value }))}
+            onChange={(event) => updateBoardMetadata((current) => ({ ...current, title: event.target.value }))}
           />
         </div>
 
@@ -1298,7 +1329,7 @@ function App() {
         <div className="topbar-group">
           <IconButton
             label={board.grid ? "Hide grid" : "Show grid"}
-            onClick={() => setBoard((current) => ({ ...current, grid: !current.grid }))}
+            onClick={() => updateBoardMetadata((current) => ({ ...current, grid: !current.grid }))}
             pressed={board.grid}
           ><GridFour /></IconButton>
           <IconButton
@@ -1312,13 +1343,13 @@ function App() {
             pressed={practiceOpen}
           ><Student /></IconButton>
           <IconButton
-            label="Trackpad Pad"
-            onClick={() => setTrackpadOpen((current) => !current)}
+            label="Mousepad capture (M)"
+            onClick={toggleMousepadCapture}
             pressed={trackpadOpen}
           ><DeviceTablet /></IconButton>
           <button
             className="text-button"
-            onClick={() => setBoard((current) => ({ ...current, theme: current.theme === "white" ? "black" : "white" }))}
+            onClick={() => updateBoardMetadata((current) => ({ ...current, theme: current.theme === "white" ? "black" : "white" }))}
           >
             <Chalkboard /> {board.theme === "white" ? "Blackboard" : "Whiteboard"}
           </button>
@@ -1348,6 +1379,7 @@ function App() {
           data-scale={view.scale}
           data-view-x={view.x}
           data-view-y={view.y}
+          data-stroke-count={board.strokes.length}
           data-selected-count={selection.size}
           data-image-count={board.imageObjects.length}
           aria-label="Whiteboard. Left drag uses the current tool, middle drag pans, right drag selects, and the wheel zooms."
@@ -1365,6 +1397,12 @@ function App() {
             dangerouslySetInnerHTML={{ __html: katex.renderToString(item.value, { throwOnError: false, trust: false }) }}
           />
         ))}
+        {trackpadOpen && mousepadCursor && (
+          <>
+            <div className="mousepad-capture-status">Mousepad captured - move to write, press M or Esc to stop</div>
+            <div className="mousepad-cursor" style={{ left: mousepadCursor.x, top: mousepadCursor.y }} />
+          </>
+        )}
         {selectionBox && (
           <div
             className="selection-box"
@@ -1420,7 +1458,8 @@ function App() {
         </label>
         <div className="dock-separator" />
         <IconButton label="Undo (Ctrl+Z)" onClick={undo} disabled={!undoStack.current.length}><ArrowCounterClockwise /></IconButton>
-        <IconButton label="Redo (Ctrl+Shift+Z)" onClick={redo} disabled={!redoStack.current.length}><ArrowClockwise /></IconButton>
+        <IconButton label="Redo (Ctrl+Y)" onClick={redo} disabled={!redoStack.current.length}><ArrowClockwise /></IconButton>
+        <IconButton label="Delete selection (Delete)" onClick={deleteSelection} disabled={!selection.size}><Trash /></IconButton>
         <IconButton
           label="Clear board"
           onClick={() => {
@@ -1430,7 +1469,7 @@ function App() {
             }
           }}
           disabled={!board.strokes.length && !board.textObjects.length && !board.imageObjects.length}
-        ><Trash /></IconButton>
+        ><Broom /></IconButton>
       </nav>
 
       {recognitionOpen && (
@@ -1468,13 +1507,14 @@ function App() {
           {recognitionState === "result" && (
             <div className="result-editor">
               {latexPreview && <div className="latex-preview" dangerouslySetInnerHTML={{ __html: latexPreview }} />}
-              <label htmlFor="recognition-result">Editable result</label>
+              <label htmlFor="recognition-result">Correct the recognized text</label>
               <textarea id="recognition-result" value={recognitionResult} onChange={(event) => setRecognitionResult(event.target.value)} rows={8} />
               <div className="panel-actions">
                 <button className="primary-button" onClick={insertRecognition}>Insert below ink</button>
                 <button className="text-button" onClick={() => navigator.clipboard.writeText(recognitionResult)}>Copy</button>
-                <button className="text-button" onClick={rememberCorrection} disabled={recognitionResult.trim() === recognitionOriginal.trim()}>Remember edit</button>
+                <button className="text-button" onClick={rememberCorrection} disabled={recognitionResult.trim() === recognitionOriginal.trim()}>Save correction</button>
               </div>
+              {correctionMessage && <p className="practice-message" aria-live="polite">{correctionMessage}</p>}
               <p className="fine-print">Review recognition before using it. Original ink is never removed automatically.</p>
             </div>
           )}
@@ -1575,36 +1615,6 @@ function App() {
         </aside>
       )}
 
-      {trackpadOpen && (
-        <section className="trackpad-shell" aria-label="Trackpad Pad">
-          <div className="trackpad-header">
-            <div>
-              <strong>Trackpad Pad</strong>
-              <span>{trackpadHoverDraw ? "Move inside the pad to write; leave the pad to finish the stroke." : "Press and drag. Position maps edge-to-edge onto the visible board."}</span>
-            </div>
-            <IconButton label="Close Trackpad Pad" onClick={() => setTrackpadOpen(false)}><X /></IconButton>
-          </div>
-          <button
-            className={`trackpad-mode-toggle ${trackpadHoverDraw ? "active" : ""}`}
-            aria-pressed={trackpadHoverDraw}
-            onClick={() => setTrackpadHoverDraw((current) => !current)}
-          >Click-free writing</button>
-          <div
-            className="trackpad-pad"
-            role="application"
-            aria-label="Mapped writing pad"
-            onPointerDown={startMappedPad}
-            onPointerMove={moveMappedPad}
-            onPointerUp={endMappedPad}
-            onPointerCancel={cancelMappedPad}
-            onPointerLeave={endHoverMappedPad}
-            onContextMenu={(event) => event.preventDefault()}
-          >
-            <span>Mapped writing area</span>
-          </div>
-        </section>
-      )}
-
       {libraryOpen && (
         <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setLibraryOpen(false)}>
           <section className="library-modal" role="dialog" aria-modal="true" aria-labelledby="library-title">
@@ -1695,11 +1705,11 @@ function App() {
                   <span>Left mouse key</span>
                   <input
                     readOnly
-                    value={keyLabel(inputBindings.leftKey)}
+                    value={inputBindings.leftKeys.map(keyLabel).join(", ")}
                     onKeyDown={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      setInputBinding("leftKey", event.key);
+                      updateInputBinding("leftKeys", event.key);
                     }}
                     aria-label="Left mouse key"
                   />
@@ -1708,11 +1718,11 @@ function App() {
                   <span>Middle mouse key</span>
                   <input
                     readOnly
-                    value={keyLabel(inputBindings.middleKey)}
+                    value={inputBindings.middleKeys.map(keyLabel).join(", ")}
                     onKeyDown={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      setInputBinding("middleKey", event.key);
+                      updateInputBinding("middleKeys", event.key);
                     }}
                     aria-label="Middle mouse key"
                   />
@@ -1721,17 +1731,17 @@ function App() {
                   <span>Right mouse key</span>
                   <input
                     readOnly
-                    value={keyLabel(inputBindings.rightKey)}
+                    value={inputBindings.rightKeys.map(keyLabel).join(", ")}
                     onKeyDown={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      setInputBinding("rightKey", event.key);
+                      updateInputBinding("rightKeys", event.key);
                     }}
                     aria-label="Right mouse key"
                   />
                 </label>
               </div>
-              <p className="fine-print">Focus a field and press the key you want. Duplicate bindings are swapped automatically.</p>
+              <p className="fine-print">Focus a field and press one or more keys to add them. Backspace removes the last key, Delete clears the field, and M is reserved for mousepad capture.</p>
             </div>
             <div className="settings-section">
               <h3>Handwriting profile</h3>

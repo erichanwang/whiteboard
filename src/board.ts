@@ -1,4 +1,4 @@
-import type { BoardDocument, BoardTheme, Bounds, ImageObject, Stroke, TextObject } from "./types";
+import type { BoardDocument, BoardTheme, Bounds, ImageObject, Point, Stroke, TextObject } from "./types";
 
 export const BOARD_STORAGE_KEY = "whiteboard.document.v1";
 export const SETTINGS_STORAGE_KEY = "whiteboard.recognition.v1";
@@ -76,17 +76,49 @@ export function strokeBounds(strokes: Stroke[]): Bounds | null {
 }
 
 export function intersectsBounds(stroke: Stroke, bounds: Bounds): boolean {
-  return stroke.points.some(
-    (point) =>
-      point.x >= bounds.x &&
-      point.x <= bounds.x + bounds.width &&
-      point.y >= bounds.y &&
-      point.y <= bounds.y + bounds.height,
-  );
+  const padding = stroke.width / 2;
+  const left = bounds.x - padding;
+  const right = bounds.x + bounds.width + padding;
+  const top = bounds.y - padding;
+  const bottom = bounds.y + bounds.height + padding;
+  const inside = (point: Point) => point.x >= left && point.x <= right && point.y >= top && point.y <= bottom;
+  if (stroke.points.some(inside)) return true;
+
+  for (let index = 1; index < stroke.points.length; index += 1) {
+    const start = stroke.points[index - 1];
+    const end = stroke.points[index];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    let minimum = 0;
+    let maximum = 1;
+    for (const [p, q] of [[-dx, start.x - left], [dx, right - start.x], [-dy, start.y - top], [dy, bottom - start.y]]) {
+      if (p === 0 && q < 0) {
+        minimum = 1;
+        maximum = 0;
+        break;
+      }
+      if (p === 0) continue;
+      const ratio = q / p;
+      if (p < 0) minimum = Math.max(minimum, ratio);
+      else maximum = Math.min(maximum, ratio);
+    }
+    if (minimum <= maximum) return true;
+  }
+  return false;
 }
 
 export function pointHitsStroke(x: number, y: number, stroke: Stroke, radius: number): boolean {
   return stroke.points.some((point) => Math.hypot(point.x - x, point.y - y) <= radius + stroke.width / 2);
+}
+
+export function textObjectBounds(item: TextObject): Bounds {
+  const lines = item.value.split("\n");
+  return {
+    x: item.x,
+    y: item.y,
+    width: Math.max(40, Math.min(480, Math.max(...lines.map((line) => line.length), 1) * 12)),
+    height: Math.max(28, lines.length * 28),
+  };
 }
 
 export function inkColor(color: string, theme: BoardTheme): string {
@@ -189,10 +221,20 @@ export function drawBoard(
   context.textBaseline = "top";
   context.font = "20px system-ui, sans-serif";
   for (const item of textObjects) {
-    if (item.kind === "latex" && !drawLatexSource) continue;
-    context.fillStyle = inkColor(item.color, theme);
-    const lines = item.value.split("\n");
-    lines.forEach((line, index) => context.fillText(line, item.x, item.y + index * 28));
+    if (item.kind !== "latex" || drawLatexSource) {
+      context.fillStyle = inkColor(item.color, theme);
+      const lines = item.value.split("\n");
+      lines.forEach((line, index) => context.fillText(line, item.x, item.y + index * 28));
+    }
+    if (selectedIds.has(item.id)) {
+      const bounds = textObjectBounds(item);
+      context.save();
+      context.strokeStyle = "#377d6a";
+      context.lineWidth = 1;
+      context.setLineDash([5, 4]);
+      context.strokeRect(bounds.x - 5, bounds.y - 5, bounds.width + 10, bounds.height + 10);
+      context.restore();
+    }
   }
 }
 

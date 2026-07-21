@@ -359,50 +359,31 @@ button:disabled { opacity: 0.34; cursor: default; }
 .practice-edit-actions { display: flex; gap: 4px; margin-top: 4px; }
 .practice-message { margin: 10px 0 0; color: var(--accent); font-size: 12px; line-height: 1.5; }
 
-.trackpad-shell {
+.mousepad-capture-status {
   position: absolute;
-  z-index: 35;
-  top: 70px;
-  left: 14px;
-  width: min(340px, calc(100vw - 28px));
-  padding: 12px;
-  border: 1px solid var(--chrome-border);
-  border-radius: 14px;
-  color: var(--chrome-text);
-  background: var(--chrome);
-  box-shadow: none;
-}
-.trackpad-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
-.trackpad-header > div { display: grid; gap: 3px; }
-.trackpad-header strong { font-size: 14px; }
-.trackpad-header span { color: var(--muted); font-size: 11px; line-height: 1.4; }
-.trackpad-header .icon-button { min-width: 36px; min-height: 36px; }
-.trackpad-mode-toggle {
-  width: 100%;
-  min-height: 36px;
-  margin-bottom: 8px;
+  z-index: 8;
+  top: 12px;
+  left: 50%;
+  padding: 7px 10px;
+  transform: translateX(-50%);
   border: 1px solid var(--chrome-border);
   border-radius: 8px;
   color: var(--chrome-text);
-  background: transparent;
-  cursor: pointer;
+  background: var(--chrome);
+  font-size: 11px;
+  pointer-events: none;
 }
-.trackpad-mode-toggle.active { color: #f6faf8; border-color: var(--accent-strong); background: var(--accent-strong); }
-.trackpad-pad {
-  display: grid;
-  place-items: center;
-  aspect-ratio: 16 / 10;
-  overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--chrome-border));
-  border-radius: 10px;
-  color: color-mix(in srgb, var(--canvas-text) 42%, transparent);
-  background-color: var(--canvas);
-  cursor: crosshair;
-  touch-action: none;
-  user-select: none;
+.mousepad-cursor {
+  position: absolute;
+  z-index: 9;
+  width: 12px;
+  height: 12px;
+  transform: translate(-50%, -50%);
+  border: 2px solid var(--canvas);
+  border-radius: 50%;
+  background: var(--accent-strong);
+  pointer-events: none;
 }
-.trackpad-pad:active { border-color: var(--accent); }
-.trackpad-pad span { font-size: 11px; pointer-events: none; }
 
 @keyframes breathe { from { opacity: 0.45; } to { opacity: 1; } }
 @keyframes startup-exit { to { opacity: 0; visibility: hidden; } }

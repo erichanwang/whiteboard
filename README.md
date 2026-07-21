@@ -10,14 +10,14 @@ It is intentionally simple. Draw, erase, zoom, pan, drop in an image, add text o
 - Pressure-aware mouse, touch, and stylus drawing
 - Cursor-centered wheel and pinch zoom
 - Middle-button panning and right-button selection
-- Persistent keyboard substitutes for left, middle, and right mouse buttons
-- A click-free Trackpad Pad that maps directly onto the visible board
+- Multiple persistent keyboard substitutes for left, middle, and right mouse buttons
+- Full-canvas click-free mousepad capture with a visible virtual pen tip
 - Text boxes, rendered LaTeX, and embedded PNG, JPEG, or WebP images
 - Undo, redo, PNG export, native project files, and a local board library
 - Password-encrypted board snapshots
 - Guided handwriting practice and optional text or LaTeX recognition
 
-New boards remember the theme, grid, current tool, ink color, pen width, Trackpad Pad mode, and mouse-button key bindings you used last.
+New boards remember the theme, grid, current tool, ink color, pen width, and mouse-button key bindings you used last.
 
 ## Controls
 
@@ -31,12 +31,17 @@ New boards remember the theme, grid, current tool, ink color, pen width, Trackpa
 | `P`, `E`, `V`, `H`, `T` | Pen, eraser, select, hand, and text tools |
 | `[` / `]` | Change pen width |
 | `0` | Reset the view |
+| `Ctrl+Z` | Undo |
+| `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
+| `Delete` | Delete the current selection |
 
-The default mouse-button keys are `Z` for left, `Space` for middle, and `X` for right. Change them under Recognition settings -> Input bindings. Hold a key and move the pointer over the canvas, much like an osu-style input setup. The bindings are saved locally.
+The default mouse-button keys are `Z` for left, `Space` for middle, and `X` for right. Change them under Recognition settings -> Input bindings. Each mouse button can have several alternative keys. Hold any assigned key and move the pointer over the canvas, much like an osu-style input setup. The bindings are saved locally.
+
+Press `M` or use the mousepad button in the top bar to capture the pointer across the full canvas. Movement writes immediately without a click; press `M` or `Esc` to finish the stroke and release the pointer. This uses relative Pointer Lock movement because normal Ubuntu webviews cannot read a touchpad's absolute contact position.
 
 ## Boards and privacy
 
-The native Board Library stores boards in Tauri's application-data directory. On Linux, library directories use `0700` permissions and board files use `0600`. Images are embedded in the board document, so a saved board does not retain the original image path.
+The native Board Library stores boards in Tauri's application-data directory. On Linux, library directories use `0700` permissions and board files use `0600`. The normal Save button writes there without opening a file dialog. Images are embedded in the board document, so a saved board does not retain the original image path.
 
 `Save encrypted board` creates a `.whiteboard.enc` snapshot protected with Argon2id and AES-256-GCM. The passphrase is not stored. The automatic library copy is separate and remains plaintext so it can act as local recovery.
 
@@ -46,7 +51,7 @@ No credentials, `.env` files, board documents, or handwriting samples belong in 
 
 Recognition is optional. The native Rust process reads `NVIDIA_NIM_API_KEY` from the process environment or your local `~/.fcc/.env`; the key is never sent to the React interface or written into a board.
 
-Recognition starts with the visible, grid-aligned area because that is usually the fastest useful scope. You can switch to selected ink or the whole board. Results stay editable and never replace the original writing automatically.
+Recognition starts with the visible, grid-aligned area because that is usually the fastest useful scope. You can switch to selected ink or the whole board. Results stay editable and never replace the original writing automatically. Correct a result in the editor and choose Save correction to include that example in later recognition requests.
 
 The practice screen collects labeled examples for letters, numbers, punctuation, words, and common math symbols. These examples guide the recognition request; this is personalization by reference, not local model fine-tuning.
 
@@ -66,10 +71,10 @@ npm install
 npm run tauri dev
 ```
 
-Build the Debian package with:
+Build the Debian package with the release helper. It removes local project and Cargo paths from the compiled binary:
 
 ```bash
-npm run tauri build -- --bundles deb
+./scripts/build-release.sh
 ```
 
 ## Tests

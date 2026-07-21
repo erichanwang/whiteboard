@@ -61,17 +61,24 @@ try {
   }
   await page.getByRole("button", { name: "Show grid" }).click();
 
+  const strokesBeforeKeyboardUndo = Number(await canvas.getAttribute("data-stroke-count"));
   await page.keyboard.press("Control+z");
-  await page.waitForTimeout(100);
-  await page.keyboard.press("Control+Shift+z");
-  await page.waitForTimeout(100);
+  await page.waitForFunction((expected) => Number(document.querySelector("canvas")?.dataset.strokeCount) === expected, strokesBeforeKeyboardUndo - 1);
+  await page.keyboard.press("Control+y");
+  await page.waitForFunction((expected) => Number(document.querySelector("canvas")?.dataset.strokeCount) === expected, strokesBeforeKeyboardUndo);
+  await page.keyboard.press("Control+z");
+  await page.waitForFunction((expected) => Number(document.querySelector("canvas")?.dataset.strokeCount) === expected, strokesBeforeKeyboardUndo - 1);
+  await page.getByRole("button", { name: "Hide grid" }).click();
+  await page.keyboard.press("Control+y");
+  await page.waitForTimeout(50);
+  if (Number(await canvas.getAttribute("data-stroke-count")) !== strokesBeforeKeyboardUndo - 1) throw new Error("Redo was not cleared after a newer board change.");
+  await page.getByRole("button", { name: "Show grid" }).click();
 
   await page.getByRole("button", { name: "Blackboard" }).click();
   if (!(await page.locator("main").getAttribute("class"))?.includes("theme-black")) {
     throw new Error("Blackboard theme did not activate.");
   }
   await page.getByRole("button", { name: "Ink color #356f9f" }).click();
-  page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "New board" }).click();
   if (!(await page.locator("main").getAttribute("class"))?.includes("theme-black")) throw new Error("New board did not keep the blackboard theme.");
   if ((await page.getByRole("button", { name: "Pen (P)" }).getAttribute("aria-pressed")) !== "true") throw new Error("New board did not keep the pen tool.");
@@ -92,6 +99,7 @@ try {
   await page.keyboard.press("Shift");
   await page.getByLabel("Left mouse key").focus();
   await page.keyboard.press("a");
+  await page.keyboard.press("b");
   await page.getByRole("button", { name: "Close settings" }).click();
 
   const viewXBeforeBoundPan = Number(await canvas.getAttribute("data-view-x"));
@@ -138,7 +146,7 @@ try {
   await page.reload({ waitUntil: "networkidle" });
   await page.getByLabel("Starting Whiteboard").waitFor({ state: "detached" });
   const restoredBindings = await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.input.v1")));
-  if (restoredBindings.leftKey !== "a" || restoredBindings.middleKey !== "Shift" || restoredBindings.rightKey !== "x") {
+  if (!restoredBindings.leftKeys.includes("a") || !restoredBindings.leftKeys.includes("b") || !restoredBindings.middleKeys.includes("Shift") || !restoredBindings.rightKeys.includes("x")) {
     throw new Error(`Mouse-key bindings did not persist: ${JSON.stringify(restoredBindings)}`);
   }
   if (!(await page.locator("main").getAttribute("class"))?.includes("theme-black")) throw new Error("Blackboard preference did not persist after restart.");
@@ -152,24 +160,33 @@ try {
   await restoredPractice.getByRole("button", { name: "Close practice" }).click();
 
   const strokesBeforePad = await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.document.v1")).strokes.length);
-  await page.getByRole("button", { name: "Trackpad Pad" }).click();
-  await page.getByRole("button", { name: "Click-free writing" }).click();
-  const pad = page.getByRole("application", { name: "Mapped writing pad" });
-  const padBox = await pad.boundingBox();
-  if (!padBox) throw new Error("Mapped writing pad did not render.");
-  await page.mouse.move(padBox.x + 40, padBox.y + 40);
-  await page.mouse.move(padBox.x + 110, padBox.y + 90, { steps: 8 });
-  await page.mouse.move(padBox.x + padBox.width + 10, padBox.y + 90);
-  await page.waitForTimeout(50);
+  await page.getByRole("button", { name: "Mousepad capture (M)" }).click();
+  await page.getByText("Mousepad captured - move to write, press M or Esc to stop").waitFor();
+  await page.mouse.move(box.x + 400, box.y + 300);
+  await page.mouse.move(box.x + 470, box.y + 360, { steps: 8 });
+  await page.keyboard.press("m");
+  await page.getByText("Mousepad captured - move to write, press M or Esc to stop").waitFor({ state: "detached" });
   const strokesAfterPad = await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.document.v1")).strokes.length);
-  if (strokesAfterPad !== strokesBeforePad + 1) throw new Error("Mapped writing pad did not add one stroke.");
-  await page.getByRole("button", { name: "Close Trackpad Pad" }).click();
+  if (strokesAfterPad !== strokesBeforePad + 1) throw new Error("Full-canvas mousepad capture did not add one click-free stroke.");
+
+  await page.getByRole("button", { name: "Save to Board Library" }).click();
 
   await page.getByRole("button", { name: "Text (T)" }).click();
   page.once("dialog", (dialog) => dialog.accept("Typed note"));
   await page.mouse.click(box.x + 520, box.y + 210);
   const textCount = await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.document.v1")).textObjects.length);
   if (textCount !== 1) throw new Error("Text tool did not add a text box.");
+
+  await page.mouse.move(box.x + 500, box.y + 190);
+  await page.mouse.down({ button: "right" });
+  await page.mouse.move(box.x + 620, box.y + 260, { steps: 5 });
+  await page.mouse.up({ button: "right" });
+  await page.getByRole("button", { name: "Delete selection (Delete)" }).click();
+  if (await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.document.v1")).textObjects.length) !== 0) throw new Error("Delete selection button did not remove selected text.");
+  await page.getByRole("button", { name: "Undo (Ctrl+Z)" }).click();
+  if (await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.document.v1")).textObjects.length) !== 1) throw new Error("Undo button did not restore deleted text.");
+  await page.getByRole("button", { name: "Redo (Ctrl+Y)" }).click();
+  if (await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.document.v1")).textObjects.length) !== 0) throw new Error("Redo button did not reapply text deletion.");
 
   page.once("dialog", (dialog) => dialog.accept(String.raw`x^2 + y^2`));
   await page.getByRole("button", { name: "Insert LaTeX" }).click();
@@ -208,8 +225,16 @@ try {
     return pixel[2] > 200 && pixel[0] < 60;
   });
   if (!imagePixelIsBlue) throw new Error("Embedded image was not rendered on the canvas.");
+  const restoredBox = await restoredCanvas.boundingBox();
+  if (!restoredBox) throw new Error("Restored canvas did not render.");
+  await page.mouse.move(restoredBox.x + 290, restoredBox.y + 290);
+  await page.mouse.down({ button: "right" });
+  await page.mouse.move(restoredBox.x + 360, restoredBox.y + 360, { steps: 5 });
+  await page.mouse.up({ button: "right" });
+  await page.keyboard.press("Delete");
+  if (Number(await restoredCanvas.getAttribute("data-image-count")) !== 0) throw new Error("Delete key did not remove the selected image.");
 
-  await page.getByRole("button", { name: "Board Library" }).click();
+  await page.getByRole("button", { name: "Board Library", exact: true }).click();
   await page.getByRole("dialog", { name: "Board Library" }).waitFor();
   await page.getByText("available in the installed Tauri app").waitFor();
   await page.getByRole("button", { name: "Close Board Library" }).click();
@@ -222,7 +247,7 @@ try {
   const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   if (horizontalOverflow) throw new Error("The app overflows horizontally at the minimum window width.");
 
-  console.log("Smoke test passed: timestamp naming, drawing/autosave, wheel zoom, mouse and persistent left/middle/right key bindings, persisted board/tool/color/grid defaults, self-contained practice persistence, click-free mapped pad, text and LaTeX objects, embedded images, library fallback, recognition failure, and minimum-width layout.");
+  console.log("Smoke test passed: timestamp naming, drawing/autosave, wheel zoom, multiple persistent left/middle/right key bindings, persisted board/tool/color/grid defaults, undo/redo and selection-delete buttons, Delete-key removal for strokes/text/images, self-contained practice persistence, full-canvas click-free mousepad capture, silent library save, text and LaTeX objects, embedded images, library fallback, recognition failure, and minimum-width layout.");
 } finally {
   await browser.close();
 }
