@@ -134,6 +134,44 @@ try {
   const textCount = await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.document.v1")).textObjects.length);
   if (textCount !== 1) throw new Error("Text tool did not add a text box.");
 
+  page.once("dialog", (dialog) => dialog.accept(String.raw`x^2 + y^2`));
+  await page.getByRole("button", { name: "Insert LaTeX" }).click();
+  const latexKind = await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.document.v1")).textObjects.at(-1)?.kind);
+  if (latexKind !== "latex") throw new Error("LaTeX insertion did not persist a LaTeX text object.");
+  await page.locator(".latex-board-object .katex").waitFor();
+
+  await page.evaluate(() => {
+    const source = document.createElement("canvas");
+    source.width = 1;
+    source.height = 1;
+    const sourceContext = source.getContext("2d");
+    sourceContext.fillStyle = "#0000ff";
+    sourceContext.fillRect(0, 0, 1, 1);
+    const board = JSON.parse(localStorage.getItem("whiteboard.document.v1"));
+    board.imageObjects.push({
+      id: crypto.randomUUID(),
+      x: 300,
+      y: 300,
+      width: 50,
+      height: 50,
+      dataUrl: source.toDataURL("image/png"),
+    });
+    localStorage.setItem("whiteboard.document.v1", JSON.stringify(board));
+  });
+  await page.reload({ waitUntil: "networkidle" });
+  await page.getByLabel("Starting Whiteboard").waitFor({ state: "detached" });
+  const restoredCanvas = page.locator("canvas").first();
+  if (Number(await restoredCanvas.getAttribute("data-image-count")) !== 1) throw new Error("Embedded image did not survive board reload.");
+  await page.waitForTimeout(100);
+  const imagePixelIsBlue = await restoredCanvas.evaluate((element) => {
+    const canvas = element;
+    const context = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    const pixel = context.getImageData(320 * dpr, 320 * dpr, 1, 1).data;
+    return pixel[2] > 200 && pixel[0] < 60;
+  });
+  if (!imagePixelIsBlue) throw new Error("Embedded image was not rendered on the canvas.");
+
   await page.getByRole("button", { name: "Board Library" }).click();
   await page.getByRole("dialog", { name: "Board Library" }).waitFor();
   await page.getByText("available in the installed Tauri app").waitFor();
@@ -147,7 +185,7 @@ try {
   const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   if (horizontalOverflow) throw new Error("The app overflows horizontally at the minimum window width.");
 
-  console.log("Smoke test passed: timestamp naming, draw/autosave, wheel zoom, mouse and bound-key pan/select, grid, self-contained practice persistence, click-free mapped pad, text boxes, library fallback, theme, settings, recognition failure, and minimum-width layout.");
+  console.log("Smoke test passed: timestamp naming, draw/autosave, wheel zoom, mouse and bound-key pan/select, grid, self-contained practice persistence, click-free mapped pad, text and LaTeX objects, embedded images, library fallback, theme, settings, recognition failure, and minimum-width layout.");
 } finally {
   await browser.close();
 }

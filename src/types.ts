@@ -26,6 +26,15 @@ export interface TextObject {
   kind: RecognitionMode;
 }
 
+export interface ImageObject {
+  id: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  dataUrl: string;
+}
+
 export interface BoardDocument {
   version: 1;
   id: string;
@@ -34,6 +43,7 @@ export interface BoardDocument {
   grid: boolean;
   strokes: Stroke[];
   textObjects: TextObject[];
+  imageObjects: ImageObject[];
   updatedAt: string;
 }
 

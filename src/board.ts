@@ -1,4 +1,4 @@
-import type { BoardDocument, BoardTheme, Bounds, Stroke, TextObject } from "./types";
+import type { BoardDocument, BoardTheme, Bounds, ImageObject, Stroke, TextObject } from "./types";
 
 export const BOARD_STORAGE_KEY = "whiteboard.document.v1";
 export const SETTINGS_STORAGE_KEY = "whiteboard.recognition.v1";
@@ -25,6 +25,7 @@ export const createBoard = (): BoardDocument => ({
   grid: true,
   strokes: [],
   textObjects: [],
+  imageObjects: [],
   updatedAt: new Date().toISOString(),
 });
 
@@ -40,7 +41,26 @@ export function parseBoard(value: string): BoardDocument {
     title: typeof parsed.title === "string" ? parsed.title : defaultBoardTitle(),
     theme: parsed.theme === "black" ? "black" : "white",
     grid: parsed.grid !== false,
+    imageObjects: Array.isArray(parsed.imageObjects)
+      ? parsed.imageObjects.filter((item): item is ImageObject => Boolean(
+        item && typeof item.id === "string" && typeof item.x === "number" && typeof item.y === "number"
+        && typeof item.width === "number" && typeof item.height === "number"
+        && typeof item.dataUrl === "string" && /^data:image\/(png|jpeg|webp);base64,/.test(item.dataUrl),
+      ))
+      : [],
   };
+}
+
+const imageCache = new Map<string, HTMLImageElement>();
+
+function cachedImage(source: string) {
+  let image = imageCache.get(source);
+  if (image) return image;
+  image = new Image();
+  image.onload = () => window.dispatchEvent(new Event("whiteboard-image-loaded"));
+  image.src = source;
+  imageCache.set(source, image);
+  return image;
 }
 
 export function strokeBounds(strokes: Stroke[]): Bounds | null {
@@ -115,11 +135,26 @@ export function drawBoard(
   context: CanvasRenderingContext2D,
   strokes: Stroke[],
   textObjects: TextObject[],
+  imageObjects: ImageObject[],
   theme: BoardTheme,
   selectedIds: Set<string> = new Set(),
+  drawLatexSource = false,
 ) {
   context.lineCap = "round";
   context.lineJoin = "round";
+
+  for (const item of imageObjects) {
+    const image = cachedImage(item.dataUrl);
+    if (image.complete && image.naturalWidth) context.drawImage(image, item.x, item.y, item.width, item.height);
+    if (selectedIds.has(item.id)) {
+      context.save();
+      context.strokeStyle = "#377d6a";
+      context.lineWidth = 1;
+      context.setLineDash([5, 4]);
+      context.strokeRect(item.x - 5, item.y - 5, item.width + 10, item.height + 10);
+      context.restore();
+    }
+  }
 
   for (const stroke of strokes) {
     if (!stroke.points.length) continue;
@@ -154,6 +189,7 @@ export function drawBoard(
   context.textBaseline = "top";
   context.font = "20px system-ui, sans-serif";
   for (const item of textObjects) {
+    if (item.kind === "latex" && !drawLatexSource) continue;
     context.fillStyle = inkColor(item.color, theme);
     const lines = item.value.split("\n");
     lines.forEach((line, index) => context.fillText(line, item.x, item.y + index * 28));
@@ -177,6 +213,6 @@ export function renderSelectionImage(strokes: Stroke[], theme: BoardTheme, cropB
   context.fillStyle = theme === "white" ? "#fcfcfa" : "#121416";
   context.fillRect(0, 0, width, height);
   context.translate(-bounds.x + padding, -bounds.y + padding);
-  drawBoard(context, strokes, [], theme);
+  drawBoard(context, strokes, [], [], theme);
   return { base64: canvas.toDataURL("image/png").split(",")[1], bounds };
 }

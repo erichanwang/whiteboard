@@ -13,7 +13,9 @@ import {
   GearSix,
   GridFour,
   Hand,
+  ImageSquare,
   MagicWand,
+  Function as FunctionIcon,
   LockKey,
   Minus,
   PencilSimple,
@@ -137,6 +139,34 @@ function loadSettings(): RecognitionSettings {
 
 function cloneBoard(board: BoardDocument): BoardDocument {
   return structuredClone(board);
+}
+
+function bytesToDataUrl(bytes: Uint8Array, mime: string) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read the image."));
+    reader.readAsDataURL(new Blob([bytes], { type: mime }));
+  });
+}
+
+function imageDimensions(source: string) {
+  return new Promise<{ width: number; height: number }>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+    image.onerror = () => reject(new Error("The selected file is not a supported image."));
+    image.src = source;
+  });
+}
+
+function selectedBoardIds(board: BoardDocument, bounds: Bounds) {
+  return new Set([
+    ...board.strokes.filter((stroke) => intersectsBounds(stroke, bounds)).map((stroke) => stroke.id),
+    ...board.imageObjects.filter((item) => (
+      item.x <= bounds.x + bounds.width && item.x + item.width >= bounds.x
+      && item.y <= bounds.y + bounds.height && item.y + item.height >= bounds.y
+    )).map((item) => item.id),
+  ]);
 }
 
 function boardPoint(event: React.PointerEvent<HTMLCanvasElement>, view: { x: number; y: number; scale: number }) {
@@ -280,11 +310,16 @@ function App() {
         viewRef.current.scale,
       );
     }
-    drawBoard(context, boardRef.current.strokes, boardRef.current.textObjects, boardRef.current.theme, selectionRef.current);
-    if (currentStroke.current) drawBoard(context, [currentStroke.current], [], boardRef.current.theme);
+    drawBoard(context, boardRef.current.strokes, boardRef.current.textObjects, boardRef.current.imageObjects, boardRef.current.theme, selectionRef.current);
+    if (currentStroke.current) drawBoard(context, [currentStroke.current], [], [], boardRef.current.theme);
   }, []);
 
   useEffect(() => redraw(), [board, view, selection, redraw]);
+
+  useEffect(() => {
+    window.addEventListener("whiteboard-image-loaded", redraw);
+    return () => window.removeEventListener("whiteboard-image-loaded", redraw);
+  }, [redraw]);
 
   const redrawPractice = useCallback(() => {
     const canvas = practiceCanvasRef.current;
@@ -303,8 +338,8 @@ function App() {
     context.fillStyle = "#fcfcfa";
     context.fillRect(0, 0, rect.width, rect.height);
     drawGrid(context, { x: 0, y: 0, width: rect.width, height: rect.height }, "white", 1);
-    drawBoard(context, practiceStrokesRef.current, [], "white");
-    if (currentPracticeStroke.current) drawBoard(context, [currentPracticeStroke.current], [], "white");
+    drawBoard(context, practiceStrokesRef.current, [], [], "white");
+    if (currentPracticeStroke.current) drawBoard(context, [currentPracticeStroke.current], [], [], "white");
   }, []);
 
   useEffect(() => redrawPractice(), [practiceOpen, practiceStrokes, redrawPractice]);
@@ -327,11 +362,12 @@ function App() {
 
   useEffect(() => {
     const serialized = JSON.stringify(board);
+    let browserSaved = true;
     try {
       localStorage.setItem(BOARD_STORAGE_KEY, serialized);
     } catch {
+      browserSaved = false;
       setSaveState("error");
-      return;
     }
     setSaveState("saving");
     let cancelled = false;
@@ -346,7 +382,7 @@ function App() {
         }
         if (isTauri()) await invoke("save_library_board", { boardJson: formatted, boardId: board.id });
         if (cancelled) return;
-        setSaveState("saved");
+        setSaveState(browserSaved || isTauri() ? "saved" : "error");
       } catch {
         if (cancelled) return;
         setSaveState("error");
@@ -478,6 +514,7 @@ function App() {
         commitBoard({
           ...boardRef.current,
           strokes: boardRef.current.strokes.filter((stroke) => !selectionRef.current.has(stroke.id)),
+          imageObjects: boardRef.current.imageObjects.filter((item) => !selectionRef.current.has(item.id)),
         });
         setSelection(new Set());
       }
@@ -495,7 +532,7 @@ function App() {
         const start = selectionOrigin.current;
         const end = canvasHover.current.point;
         const bounds = { x: Math.min(start.x, end.x), y: Math.min(start.y, end.y), width: Math.abs(end.x - start.x), height: Math.abs(end.y - start.y) };
-        setSelection(new Set(boardRef.current.strokes.filter((stroke) => intersectsBounds(stroke, bounds)).map((stroke) => stroke.id)));
+        setSelection(selectedBoardIds(boardRef.current, bounds));
         setSelectionBox(null);
         selectionOrigin.current = null;
       }
@@ -685,7 +722,7 @@ function App() {
         width: Math.abs(end.x - start.x),
         height: Math.abs(end.y - start.y),
       };
-      setSelection(new Set(boardRef.current.strokes.filter((stroke) => intersectsBounds(stroke, bounds)).map((stroke) => stroke.id)));
+      setSelection(selectedBoardIds(boardRef.current, bounds));
       selectionOrigin.current = null;
       setSelectionBox(null);
     }
@@ -723,7 +760,7 @@ function App() {
   }
 
   async function openBoard() {
-    if ((board.strokes.length || board.textObjects.length) && !window.confirm("Open another board? Save the current board first if you want to keep it.")) return;
+    if ((board.strokes.length || board.textObjects.length || board.imageObjects.length) && !window.confirm("Open another board? Save the current board first if you want to keep it.")) return;
     try {
       const path = await open({ multiple: false, filters: [{ name: "Whiteboard", extensions: ["json", "enc"] }] });
       if (!path) return;
@@ -757,6 +794,60 @@ function App() {
     } catch (error) {
       window.alert(`Could not prepare the encrypted save: ${String(error)}`);
     }
+  }
+
+  async function insertImage() {
+    try {
+      const path = await open({
+        multiple: false,
+        filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp"] }],
+      });
+      if (!path || Array.isArray(path)) return;
+      const bytes = await readFile(path);
+      if (bytes.byteLength > 8 * 1024 * 1024) throw new Error("Choose an image smaller than 8 MB.");
+      const extension = path.split(".").pop()?.toLowerCase();
+      const mime = extension === "png" ? "image/png" : extension === "webp" ? "image/webp" : "image/jpeg";
+      const dataUrl = await bytesToDataUrl(bytes, mime);
+      const dimensions = await imageDimensions(dataUrl);
+      const ratio = Math.min(1, 640 / dimensions.width, 480 / dimensions.height);
+      const imageWidth = Math.max(1, dimensions.width * ratio);
+      const imageHeight = Math.max(1, dimensions.height * ratio);
+      const canvas = canvasRef.current;
+      const rect = canvas?.getBoundingClientRect();
+      const centerX = ((rect?.width ?? 640) / 2 - viewRef.current.x) / viewRef.current.scale;
+      const centerY = ((rect?.height ?? 480) / 2 - viewRef.current.y) / viewRef.current.scale;
+      commitBoard({
+        ...boardRef.current,
+        imageObjects: [...boardRef.current.imageObjects, {
+          id: crypto.randomUUID(),
+          x: centerX - imageWidth / 2,
+          y: centerY - imageHeight / 2,
+          width: imageWidth,
+          height: imageHeight,
+          dataUrl,
+        }],
+      });
+    } catch (error) {
+      window.alert(`Could not insert the image: ${String(error)}`);
+    }
+  }
+
+  function insertLatex() {
+    const value = window.prompt("LaTeX to add", String.raw`\frac{a}{b}`)?.trim();
+    if (!value) return;
+    const canvas = canvasRef.current;
+    const rect = canvas?.getBoundingClientRect();
+    commitBoard({
+      ...boardRef.current,
+      textObjects: [...boardRef.current.textObjects, {
+        id: crypto.randomUUID(),
+        x: ((rect?.width ?? 640) / 2 - viewRef.current.x) / viewRef.current.scale,
+        y: ((rect?.height ?? 480) / 2 - viewRef.current.y) / viewRef.current.scale,
+        value,
+        color,
+        kind: "latex",
+      }],
+    });
   }
 
   async function submitEncryption() {
@@ -822,7 +913,7 @@ function App() {
         view.scale,
       );
     }
-    drawBoard(context, board.strokes, board.textObjects, board.theme);
+    drawBoard(context, board.strokes, board.textObjects, board.imageObjects, board.theme, new Set(), true);
     const bytes = new Uint8Array(await (await fetch(exportCanvas.toDataURL("image/png"))).arrayBuffer());
     try {
       const path = await save({ defaultPath: `${board.title || defaultBoardTitle()}.png`, filters: [{ name: "PNG image", extensions: ["png"] }] });
@@ -833,7 +924,7 @@ function App() {
   }
 
   function newBoard() {
-    if ((board.strokes.length || board.textObjects.length) && !window.confirm("Create a new board? Save the current board first if you want to keep it.")) return;
+    if ((board.strokes.length || board.textObjects.length || board.imageObjects.length) && !window.confirm("Create a new board? Save the current board first if you want to keep it.")) return;
     setBoard(createBoard());
     setFilePath(null);
     setSelection(new Set());
@@ -1216,6 +1307,8 @@ function App() {
           <button className="primary-button" onClick={() => runRecognition("text")}>
             <MagicWand /> Recognize
           </button>
+          <IconButton label="Insert image" onClick={insertImage}><ImageSquare /></IconButton>
+          <IconButton label="Insert LaTeX" onClick={insertLatex}><FunctionIcon /></IconButton>
           <IconButton label="Export PNG" onClick={exportPng}><DownloadSimple /></IconButton>
           <IconButton label="Recognition settings" onClick={() => setSettingsOpen(true)}><GearSix /></IconButton>
         </div>
@@ -1238,8 +1331,22 @@ function App() {
           data-view-x={view.x}
           data-view-y={view.y}
           data-selected-count={selection.size}
+          data-image-count={board.imageObjects.length}
           aria-label="Whiteboard. Left drag uses the current tool, middle drag pans, right drag selects, and the wheel zooms."
         />
+        {board.textObjects.filter((item) => item.kind === "latex").map((item) => (
+          <div
+            key={item.id}
+            className="latex-board-object"
+            style={{
+              left: item.x * view.scale + view.x,
+              top: item.y * view.scale + view.y,
+              color: inkColor(item.color, board.theme),
+              transform: `scale(${view.scale})`,
+            }}
+            dangerouslySetInnerHTML={{ __html: katex.renderToString(item.value, { throwOnError: false, trust: false }) }}
+          />
+        ))}
         {selectionBox && (
           <div
             className="selection-box"
@@ -1251,7 +1358,7 @@ function App() {
             }}
           />
         )}
-        {!board.strokes.length && !board.textObjects.length && (
+        {!board.strokes.length && !board.textObjects.length && !board.imageObjects.length && (
           <div className="empty-state">
             <PencilSimple />
             <strong>Start drawing</strong>
@@ -1299,12 +1406,12 @@ function App() {
         <IconButton
           label="Clear board"
           onClick={() => {
-            if (window.confirm("Clear every stroke and text object?")) {
-              commitBoard({ ...board, strokes: [], textObjects: [] });
+            if (window.confirm("Clear every stroke, text object, and image?")) {
+              commitBoard({ ...board, strokes: [], textObjects: [], imageObjects: [] });
               setSelection(new Set());
             }
           }}
-          disabled={!board.strokes.length && !board.textObjects.length}
+          disabled={!board.strokes.length && !board.textObjects.length && !board.imageObjects.length}
         ><Trash /></IconButton>
       </nav>
 

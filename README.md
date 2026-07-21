@@ -10,7 +10,7 @@ Mouse controls:
 - Wheel, two-finger scroll, or pinch: zoom around the cursor
 - Hold configurable Draw, Pan, or Select keys while moving the cursor for osu-style button-free input
 
-The Text tool inserts a text box at the clicked board position. Click an existing text box with the Text tool to edit it.
+The Text tool inserts a text box at the clicked board position. Click an existing text box with the Text tool to edit it. The top bar can also embed a local PNG, JPEG, or WebP image and insert a KaTeX-rendered LaTeX object at the visible board center. Embedded images stay inside the board document rather than retaining a local file path.
 
 ## Board Library and files
 
@@ -53,7 +53,7 @@ npm run tauri dev
 Build an installable package with:
 
 ```bash
-npm run tauri build
+npm run tauri build -- --bundles deb
 ```
 
 ## Verification
