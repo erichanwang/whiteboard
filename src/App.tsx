@@ -72,7 +72,14 @@ type SaveState = "saved" | "saving" | "error";
 type RecognitionState = "idle" | "loading" | "result" | "error";
 type RecognitionScope = "visible" | "selection" | "board";
 type InputBindings = { drawKey: string; panKey: string; selectKey: string };
-type UiPreferences = { tool: Tool; color: string; width: number; trackpadHoverDraw: boolean };
+type UiPreferences = {
+  tool: Tool;
+  color: string;
+  width: number;
+  trackpadHoverDraw: boolean;
+  theme: BoardDocument["theme"];
+  grid: boolean;
+};
 type LibraryBoard = { id: string; title: string; updatedAt: string };
 type EncryptionRequest = { action: "save" | "open"; path: string; encrypted?: Uint8Array };
 
@@ -104,16 +111,20 @@ function loadUiPreferences(): UiPreferences {
       color: typeof parsed?.color === "string" ? parsed.color : "auto",
       width: typeof parsed?.width === "number" ? Math.min(18, Math.max(1, parsed.width)) : 4,
       trackpadHoverDraw: parsed?.trackpadHoverDraw === true,
+      theme: parsed?.theme === "black" ? "black" : "white",
+      grid: parsed?.grid !== false,
     };
   } catch {
-    return { tool: "pen", color: "auto", width: 4, trackpadHoverDraw: false };
+    return { tool: "pen", color: "auto", width: 4, trackpadHoverDraw: false, theme: "white", grid: true };
   }
 }
 
 function loadBoard(): BoardDocument {
   try {
     const saved = localStorage.getItem(BOARD_STORAGE_KEY);
-    return saved ? parseBoard(saved) : createBoard();
+    if (saved) return parseBoard(saved);
+    const preferences = loadUiPreferences();
+    return { ...createBoard(), theme: preferences.theme, grid: preferences.grid };
   } catch {
     return createBoard();
   }
@@ -408,8 +419,15 @@ function App() {
   }, [inputBindings]);
 
   useEffect(() => {
-    localStorage.setItem(UI_STORAGE_KEY, JSON.stringify({ tool, color, width, trackpadHoverDraw } satisfies UiPreferences));
-  }, [tool, color, width, trackpadHoverDraw]);
+    localStorage.setItem(UI_STORAGE_KEY, JSON.stringify({
+      tool,
+      color,
+      width,
+      trackpadHoverDraw,
+      theme: board.theme,
+      grid: board.grid,
+    } satisfies UiPreferences));
+  }, [tool, color, width, trackpadHoverDraw, board.theme, board.grid]);
 
   const commitBoard = useCallback((next: BoardDocument) => {
     undoStack.current.push(cloneBoard(boardRef.current));
@@ -925,7 +943,7 @@ function App() {
 
   function newBoard() {
     if ((board.strokes.length || board.textObjects.length || board.imageObjects.length) && !window.confirm("Create a new board? Save the current board first if you want to keep it.")) return;
-    setBoard(createBoard());
+    setBoard({ ...createBoard(), theme: board.theme, grid: board.grid });
     setFilePath(null);
     setSelection(new Set());
     undoStack.current = [];

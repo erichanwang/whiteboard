@@ -12,6 +12,8 @@ Mouse controls:
 
 The Text tool inserts a text box at the clicked board position. Click an existing text box with the Text tool to edit it. The top bar can also embed a local PNG, JPEG, or WebP image and insert a KaTeX-rendered LaTeX object at the visible board center. Embedded images stay inside the board document rather than retaining a local file path.
 
+New boards keep the last board theme, grid, tool, ink color, pen width, and click-free Trackpad Pad preference.
+
 ## Board Library and files
 
 New boards receive a sortable local date-time name. The native Board Library autosaves each board as a private JSON file in Tauri's application-data directory. Library directories use `0700` permissions and board files use `0600` on Linux.

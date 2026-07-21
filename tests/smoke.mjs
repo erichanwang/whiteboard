@@ -70,9 +70,24 @@ try {
   if (!(await page.locator("main").getAttribute("class"))?.includes("theme-black")) {
     throw new Error("Blackboard theme did not activate.");
   }
+  await page.getByRole("button", { name: "Ink color #356f9f" }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: "New board" }).click();
+  if (!(await page.locator("main").getAttribute("class"))?.includes("theme-black")) throw new Error("New board did not keep the blackboard theme.");
+  if ((await page.getByRole("button", { name: "Pen (P)" }).getAttribute("aria-pressed")) !== "true") throw new Error("New board did not keep the pen tool.");
+  if ((await page.getByRole("button", { name: "Ink color #356f9f" }).getAttribute("aria-pressed")) !== "true") throw new Error("New board did not keep the pen color.");
+  if (!(await page.getByRole("button", { name: "Hide grid" }).isVisible())) throw new Error("New board did not keep the grid setting.");
 
   await page.getByRole("button", { name: "Recognition settings" }).click();
   await page.getByRole("dialog", { name: "Model recognition" }).waitFor();
+  const blackboardSelectStyle = await page.getByLabel("Sample type").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { color: style.color, background: style.backgroundColor, colorScheme: style.colorScheme };
+  });
+  if (blackboardSelectStyle.colorScheme !== "dark" || blackboardSelectStyle.color !== "rgb(241, 242, 239)" || blackboardSelectStyle.background !== "rgb(32, 35, 36)") {
+    throw new Error(`Blackboard dropdown colors are incorrect: ${JSON.stringify(blackboardSelectStyle)}`);
+  }
+  if (await page.locator(".tool-dock").evaluate((element) => getComputedStyle(element).boxShadow) !== "none") throw new Error("Tool dock still has an excessive shadow.");
   await page.getByLabel("Pan action key").focus();
   await page.keyboard.press("Shift");
   await page.getByRole("button", { name: "Close settings" }).click();
@@ -106,6 +121,8 @@ try {
 
   await page.reload({ waitUntil: "networkidle" });
   await page.getByLabel("Starting Whiteboard").waitFor({ state: "detached" });
+  if (!(await page.locator("main").getAttribute("class"))?.includes("theme-black")) throw new Error("Blackboard preference did not persist after restart.");
+  if ((await page.getByRole("button", { name: "Ink color #356f9f" }).getAttribute("aria-pressed")) !== "true") throw new Error("Pen color preference did not persist after restart.");
   await page.getByRole("button", { name: "Handwriting practice" }).click();
   const restoredPractice = page.getByRole("complementary", { name: "Handwriting practice" });
   await restoredPractice.getByLabel("Exercise").selectOption("digits");
@@ -185,7 +202,7 @@ try {
   const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
   if (horizontalOverflow) throw new Error("The app overflows horizontally at the minimum window width.");
 
-  console.log("Smoke test passed: timestamp naming, draw/autosave, wheel zoom, mouse and bound-key pan/select, grid, self-contained practice persistence, click-free mapped pad, text and LaTeX objects, embedded images, library fallback, theme, settings, recognition failure, and minimum-width layout.");
+  console.log("Smoke test passed: timestamp naming, drawing/autosave, wheel zoom, mouse and bound-key pan/select, persisted board/tool/color/grid defaults, self-contained practice persistence, click-free mapped pad, text and LaTeX objects, embedded images, library fallback, recognition failure, and minimum-width layout.");
 } finally {
   await browser.close();
 }
