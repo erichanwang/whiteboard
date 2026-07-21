@@ -41,6 +41,16 @@ export function parseBoard(value: string): BoardDocument {
     title: typeof parsed.title === "string" ? parsed.title : defaultBoardTitle(),
     theme: parsed.theme === "black" ? "black" : "white",
     grid: parsed.grid !== false,
+    textObjects: parsed.textObjects.filter((item): item is TextObject => Boolean(
+      item && typeof item.id === "string" && typeof item.x === "number" && typeof item.y === "number"
+      && typeof item.value === "string" && typeof item.color === "string"
+      && (item.kind === "text" || item.kind === "latex"),
+    )).map((item) => ({
+      ...item,
+      fontSize: typeof item.fontSize === "number" && Number.isFinite(item.fontSize)
+        ? Math.min(256, Math.max(8, item.fontSize))
+        : undefined,
+    })),
     imageObjects: Array.isArray(parsed.imageObjects)
       ? parsed.imageObjects.filter((item): item is ImageObject => Boolean(
         item && typeof item.id === "string" && typeof item.x === "number" && typeof item.y === "number"
@@ -113,11 +123,12 @@ export function pointHitsStroke(x: number, y: number, stroke: Stroke, radius: nu
 
 export function textObjectBounds(item: TextObject): Bounds {
   const lines = item.value.split("\n");
+  const fontSize = item.fontSize ?? 20;
   return {
     x: item.x,
     y: item.y,
-    width: Math.max(40, Math.min(480, Math.max(...lines.map((line) => line.length), 1) * 12)),
-    height: Math.max(28, lines.length * 28),
+    width: Math.max(fontSize * 2, Math.min(fontSize * 24, Math.max(...lines.map((line) => line.length), 1) * fontSize * 0.6)),
+    height: Math.max(fontSize * 1.4, lines.length * fontSize * 1.4),
   };
 }
 
@@ -171,6 +182,7 @@ export function drawBoard(
   theme: BoardTheme,
   selectedIds: Set<string> = new Set(),
   drawLatexSource = false,
+  drawPlainText = true,
 ) {
   context.lineCap = "round";
   context.lineJoin = "round";
@@ -219,12 +231,13 @@ export function drawBoard(
   }
 
   context.textBaseline = "top";
-  context.font = "20px system-ui, sans-serif";
   for (const item of textObjects) {
-    if (item.kind !== "latex" || drawLatexSource) {
+    if ((item.kind === "text" && drawPlainText) || (item.kind === "latex" && drawLatexSource)) {
       context.fillStyle = inkColor(item.color, theme);
+      const fontSize = item.fontSize ?? 20;
+      context.font = `${fontSize}px system-ui, sans-serif`;
       const lines = item.value.split("\n");
-      lines.forEach((line, index) => context.fillText(line, item.x, item.y + index * 28));
+      lines.forEach((line, index) => context.fillText(line, item.x, item.y + index * fontSize * 1.4));
     }
     if (selectedIds.has(item.id)) {
       const bounds = textObjectBounds(item);

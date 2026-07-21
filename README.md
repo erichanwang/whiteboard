@@ -10,8 +10,9 @@ It is intentionally simple. Draw, erase, zoom, pan, drop in an image, add text o
 - Pressure-aware mouse, touch, and stylus drawing
 - Cursor-centered wheel and pinch zoom
 - Middle-button panning and right-button selection
+- Move selected content with a left drag and resize it from the corner handle
 - Multiple persistent keyboard substitutes for left, middle, and right mouse buttons
-- Full-canvas click-free mousepad capture with a visible virtual pen tip
+- Full-canvas cursor lock with slightly accelerated movement and a visible pen tip
 - Text boxes, rendered LaTeX, and embedded PNG, JPEG, or WebP images
 - Undo, redo, PNG export, native project files, and a local board library
 - Password-encrypted board snapshots
@@ -35,9 +36,13 @@ New boards remember the theme, grid, current tool, ink color, pen width, and mou
 | `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
 | `Delete` | Delete the current selection |
 
+Scroll over the tool group in the bottom bar to cycle through Select, Pen, Eraser, Pan, and Text.
+
 The default mouse-button keys are `Z` for left, `Space` for middle, and `X` for right. Change them under Recognition settings -> Input bindings. Each mouse button can have several alternative keys. Hold any assigned key and move the pointer over the canvas, much like an osu-style input setup. The bindings are saved locally.
 
-Press `M` or use the mousepad button in the top bar to capture the pointer across the full canvas. Movement writes immediately without a click; press `M` or `Esc` to finish the stroke and release the pointer. This uses relative Pointer Lock movement because normal Ubuntu webviews cannot read a touchpad's absolute contact position.
+Press `M` or use Lock cursor in the top bar to capture the pointer across the full canvas. Hold the left mouse or touchpad button while moving to write; press `M` or `Esc` to release the pointer. This uses relative Pointer Lock movement because normal Ubuntu webviews cannot read a touchpad's absolute contact position.
+
+The clear control lets you remove only content intersecting the visible screen or clear the entire whiteboard. Both actions can be undone.
 
 ## Boards and privacy
 
@@ -51,9 +56,9 @@ No credentials, `.env` files, board documents, or handwriting samples belong in 
 
 Recognition is optional. The native Rust process reads `NVIDIA_NIM_API_KEY` from the process environment or your local `~/.fcc/.env`; the key is never sent to the React interface or written into a board.
 
-Recognition starts with the visible, grid-aligned area because that is usually the fastest useful scope. You can switch to selected ink or the whole board. Results stay editable and never replace the original writing automatically. Correct a result in the editor and choose Save correction to include that example in later recognition requests.
+Recognition starts with the visible, grid-aligned area because that is usually the fastest useful scope. You can switch to selected ink or the whole board. The recognized area receives a light outline. Results stay editable and never replace the original writing automatically. Choose Looks correct to save a positive visual reference, or edit the result and choose Save correction. These local examples guide later requests; they do not train the remote model.
 
-The practice screen collects labeled examples for letters, numbers, punctuation, words, and common math symbols. These examples guide the recognition request; this is personalization by reference, not local model fine-tuning.
+The practice screen collects labeled examples for letters, numbers, punctuation, words, and common math symbols. After every lowercase letter has five guided samples, an experimental display mode can compose lowercase board text from your latest samples. Unsupported characters and PNG export retain the system-font fallback. This is a raster glyph renderer, not a generated TTF or local model fine-tuning.
 
 ## Run it on Ubuntu
 

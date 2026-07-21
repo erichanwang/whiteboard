@@ -24,6 +24,7 @@ export interface TextObject {
   value: string;
   color: string;
   kind: RecognitionMode;
+  fontSize?: number;
 }
 
 export interface ImageObject {
@@ -76,4 +77,5 @@ export interface RecognitionSettings {
   model: string;
   samples: CalibrationSample[];
   corrections: Correction[];
+  handwritingFontEnabled: boolean;
 }

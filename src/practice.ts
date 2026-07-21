@@ -75,9 +75,13 @@ export async function buildProfileSheet(samples: CalibrationSample[]): Promise<s
   const latestByLabel = new Map<string, CalibrationSample>();
   for (const sample of samples) latestByLabel.set(`${sample.exercise ?? "manual"}:${sample.label}`, sample);
   const balanced = [...latestByLabel.values()];
-  const selectedIds = new Set(balanced.map((sample) => sample.id));
-  const repeats = samples.filter((sample) => !selectedIds.has(sample.id)).slice(-(120 - balanced.length));
-  const selected = [...balanced, ...repeats].slice(-120);
+  const guided = balanced.filter((sample) => sample.exercise !== "feedback").slice(-90);
+  const feedback = balanced.filter((sample) => sample.exercise === "feedback").slice(-30);
+  const prioritized = [...guided, ...feedback];
+  const selectedIds = new Set(prioritized.map((sample) => sample.id));
+  const remaining = Math.max(0, 120 - prioritized.length);
+  const repeats = remaining ? samples.filter((sample) => !selectedIds.has(sample.id)).slice(-remaining) : [];
+  const selected = [...prioritized, ...repeats].slice(-120);
   const loaded = await Promise.allSettled(selected.map(async (sample) => ({ sample, image: await imageFromBase64(sample.image) })));
   const valid = loaded.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
   if (!valid.length) return null;

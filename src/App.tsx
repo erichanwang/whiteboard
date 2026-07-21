@@ -46,6 +46,7 @@ import {
   parseBoard,
   pointHitsStroke,
   renderSelectionImage,
+  strokeBounds,
   textObjectBounds,
 } from "./board";
 import { listNvidiaModels, recognizeInk } from "./recognition";
@@ -68,6 +69,7 @@ const DEFAULT_SETTINGS: RecognitionSettings = {
   model: "mistralai/mistral-large-3-675b-instruct-2512",
   samples: [],
   corrections: [],
+  handwritingFontEnabled: false,
 };
 
 type SaveState = "saved" | "saving" | "error";
@@ -91,6 +93,25 @@ type UiPreferences = {
 };
 type LibraryBoard = { id: string; title: string; updatedAt: string };
 type EncryptionRequest = { action: "save" | "open"; path: string; encrypted?: Uint8Array };
+type TextEditorRequest = {
+  kind: "text" | "latex";
+  value: string;
+  boardX: number;
+  boardY: number;
+  anchorX: number;
+  anchorY: number;
+  targetId?: string;
+};
+type SelectionTransform = {
+  mode: "move" | "resize";
+  start: Point;
+  bounds: Bounds;
+  original: BoardDocument;
+  ids: Set<string>;
+  changed: boolean;
+};
+type RecognitionAttempt = { image: string; bounds: Bounds; mode: RecognitionMode };
+type HandwritingGlyph = { dataUrl: string; aspect: number };
 
 const DEFAULT_INPUT_BINDINGS: InputBindings = { leftKeys: ["z"], middleKeys: [" "], rightKeys: ["x"] };
 
@@ -152,6 +173,7 @@ function loadSettings(): RecognitionSettings {
       ...parsed,
       provider: "nvidia",
       model: parsed.model?.includes("/") ? parsed.model : DEFAULT_SETTINGS.model,
+      handwritingFontEnabled: parsed.handwritingFontEnabled === true,
       samples: Array.isArray(parsed.samples) ? parsed.samples.filter((sample) => sample && typeof sample.image === "string" && typeof sample.label === "string") : [],
       corrections: Array.isArray(parsed.corrections) ? parsed.corrections.filter((correction) => correction && typeof correction.original === "string" && typeof correction.corrected === "string") : [],
     };
@@ -197,6 +219,102 @@ function selectedBoardIds(board: BoardDocument, bounds: Bounds) {
   ]);
 }
 
+function selectedContentBounds(board: BoardDocument, ids: Set<string>): Bounds | null {
+  const bounds = [
+    strokeBounds(board.strokes.filter((item) => ids.has(item.id))),
+    ...board.textObjects.filter((item) => ids.has(item.id)).map(textObjectBounds),
+    ...board.imageObjects.filter((item) => ids.has(item.id)).map((item) => ({ x: item.x, y: item.y, width: item.width, height: item.height })),
+  ].filter((item): item is Bounds => Boolean(item));
+  if (!bounds.length) return null;
+  const left = Math.min(...bounds.map((item) => item.x));
+  const top = Math.min(...bounds.map((item) => item.y));
+  const right = Math.max(...bounds.map((item) => item.x + item.width));
+  const bottom = Math.max(...bounds.map((item) => item.y + item.height));
+  return { x: left, y: top, width: Math.max(1, right - left), height: Math.max(1, bottom - top) };
+}
+
+function transformSelection(board: BoardDocument, ids: Set<string>, bounds: Bounds, offsetX: number, offsetY: number, scaleX = 1, scaleY = 1): BoardDocument {
+  const averageScale = (scaleX + scaleY) / 2;
+  const transformPoint = (point: Point): Point => ({
+    ...point,
+    x: bounds.x + (point.x - bounds.x) * scaleX + offsetX,
+    y: bounds.y + (point.y - bounds.y) * scaleY + offsetY,
+  });
+  return {
+    ...board,
+    strokes: board.strokes.map((item) => ids.has(item.id) ? {
+      ...item,
+      width: Math.max(1, item.width * averageScale),
+      points: item.points.map(transformPoint),
+    } : item),
+    textObjects: board.textObjects.map((item) => ids.has(item.id) ? {
+      ...item,
+      x: bounds.x + (item.x - bounds.x) * scaleX + offsetX,
+      y: bounds.y + (item.y - bounds.y) * scaleY + offsetY,
+      fontSize: Math.max(8, (item.fontSize ?? 20) * averageScale),
+    } : item),
+    imageObjects: board.imageObjects.map((item) => ids.has(item.id) ? {
+      ...item,
+      x: bounds.x + (item.x - bounds.x) * scaleX + offsetX,
+      y: bounds.y + (item.y - bounds.y) * scaleY + offsetY,
+      width: Math.max(8, item.width * scaleX),
+      height: Math.max(8, item.height * scaleY),
+    } : item),
+  };
+}
+
+function prepareHandwritingGlyph(base64: string): Promise<HandwritingGlyph | null> {
+  return new Promise((resolve) => {
+    const image = new Image();
+    image.onload = () => {
+      const source = document.createElement("canvas");
+      source.width = image.naturalWidth;
+      source.height = image.naturalHeight;
+      const context = source.getContext("2d", { willReadFrequently: true });
+      if (!context) return resolve(null);
+      context.drawImage(image, 0, 0);
+      const pixels = context.getImageData(0, 0, source.width, source.height);
+      let left = source.width;
+      let top = source.height;
+      let right = -1;
+      let bottom = -1;
+      for (let y = 0; y < source.height; y += 1) {
+        for (let x = 0; x < source.width; x += 1) {
+          const index = (y * source.width + x) * 4;
+          const luminance = (pixels.data[index] + pixels.data[index + 1] + pixels.data[index + 2]) / 3;
+          if (pixels.data[index + 3] > 20 && luminance < 225) {
+            left = Math.min(left, x);
+            top = Math.min(top, y);
+            right = Math.max(right, x);
+            bottom = Math.max(bottom, y);
+          }
+        }
+      }
+      if (right < left || bottom < top) return resolve(null);
+      const width = right - left + 1;
+      const height = bottom - top + 1;
+      const output = document.createElement("canvas");
+      output.width = width;
+      output.height = height;
+      const outputContext = output.getContext("2d", { willReadFrequently: true });
+      if (!outputContext) return resolve(null);
+      outputContext.drawImage(source, left, top, width, height, 0, 0, width, height);
+      const mask = outputContext.getImageData(0, 0, width, height);
+      for (let index = 0; index < mask.data.length; index += 4) {
+        const luminance = (mask.data[index] + mask.data[index + 1] + mask.data[index + 2]) / 3;
+        mask.data[index] = 0;
+        mask.data[index + 1] = 0;
+        mask.data[index + 2] = 0;
+        mask.data[index + 3] = Math.max(0, 255 - luminance);
+      }
+      outputContext.putImageData(mask, 0, 0);
+      resolve({ dataUrl: output.toDataURL("image/png"), aspect: width / Math.max(height, 1) });
+    };
+    image.onerror = () => resolve(null);
+    image.src = `data:image/png;base64,${base64}`;
+  });
+}
+
 function boardPoint(event: React.PointerEvent<HTMLCanvasElement>, view: { x: number; y: number; scale: number }) {
   const rect = event.currentTarget.getBoundingClientRect();
   return {
@@ -231,6 +349,9 @@ function App() {
   const [recognitionResult, setRecognitionResult] = useState("");
   const [recognitionOriginal, setRecognitionOriginal] = useState("");
   const [recognitionError, setRecognitionError] = useState("");
+  const [recognitionHighlight, setRecognitionHighlight] = useState<Bounds | null>(null);
+  const [recognitionAttempt, setRecognitionAttempt] = useState<RecognitionAttempt | null>(null);
+  const [recognitionFeedbackSaved, setRecognitionFeedbackSaved] = useState(false);
   const [correctionMessage, setCorrectionMessage] = useState("");
   const [practiceOpen, setPracticeOpen] = useState(false);
   const [practiceSetId, setPracticeSetId] = useState(PRACTICE_SETS[0].id);
@@ -249,6 +370,11 @@ function App() {
   const [encryptionPassword, setEncryptionPassword] = useState("");
   const [encryptionConfirmation, setEncryptionConfirmation] = useState("");
   const [encryptionError, setEncryptionError] = useState("");
+  const [textEditor, setTextEditor] = useState<TextEditorRequest | null>(null);
+  const [clearMenuOpen, setClearMenuOpen] = useState(false);
+  const [clearScope, setClearScope] = useState<"visible" | "board">("visible");
+  const [transformPreview, setTransformPreview] = useState<BoardDocument | null>(null);
+  const [handwritingGlyphs, setHandwritingGlyphs] = useState<Record<string, HandwritingGlyph>>({});
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const practiceCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -276,11 +402,14 @@ function App() {
   const pressedKeys = useRef(new Set<string>());
   const canvasHover = useRef<{ clientX: number; clientY: number; point: Point } | null>(null);
   const keyboardPointerAction = useRef<"left" | "middle" | "right" | null>(null);
+  const selectionTransformRef = useRef<SelectionTransform | null>(null);
+  const transformPreviewRef = useRef<BoardDocument | null>(null);
 
   boardRef.current = board;
   viewRef.current = view;
   selectionRef.current = selection;
   practiceStrokesRef.current = practiceStrokes;
+  transformPreviewRef.current = transformPreview;
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setStartupVisible(false), 550);
@@ -291,6 +420,12 @@ function App() {
     () => board.strokes.filter((stroke) => selection.has(stroke.id)),
     [board.strokes, selection],
   );
+  const handwritingCoverage = useMemo(() => [..."abcdefghijklmnopqrstuvwxyz"].filter((letter) =>
+    settings.samples.filter((sample) => sample.exercise === "lowercase" && sample.mode === "text" && sample.label === letter).length >= 5,
+  ).length, [settings.samples]);
+  const handwritingFontReady = handwritingCoverage === 26;
+  const displayBoard = transformPreview ?? board;
+  const selectionBounds = useMemo(() => selectedContentBounds(displayBoard, selection), [displayBoard, selection]);
   const practiceSet = PRACTICE_SETS.find((item) => item.id === practiceSetId) ?? PRACTICE_SETS[0];
   const practiceTarget = practiceSet.targets[practiceIndex % practiceSet.targets.length];
   const practiceTargetLabel = practiceLabel(practiceSet, practiceTarget);
@@ -302,6 +437,25 @@ function App() {
     [practiceStrokes],
   );
   const practiceReady = practiceInkLength >= 8;
+
+  useEffect(() => {
+    if (!settings.handwritingFontEnabled || !handwritingFontReady) {
+      setHandwritingGlyphs({});
+      if (settings.handwritingFontEnabled && !handwritingFontReady) {
+        setSettings((current) => ({ ...current, handwritingFontEnabled: false }));
+      }
+      return;
+    }
+    let cancelled = false;
+    void Promise.all([..."abcdefghijklmnopqrstuvwxyz"].map(async (letter) => {
+      const sample = [...settings.samples].reverse().find((item) => item.exercise === "lowercase" && item.mode === "text" && item.label === letter);
+      return [letter, sample ? await prepareHandwritingGlyph(sample.image) : null] as const;
+    })).then((entries) => {
+      if (cancelled) return;
+      setHandwritingGlyphs(Object.fromEntries(entries.filter((entry): entry is readonly [string, HandwritingGlyph] => Boolean(entry[1]))));
+    });
+    return () => { cancelled = true; };
+  }, [handwritingFontReady, settings.handwritingFontEnabled, settings.samples]);
 
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
@@ -339,11 +493,21 @@ function App() {
         viewRef.current.scale,
       );
     }
-    drawBoard(context, boardRef.current.strokes, boardRef.current.textObjects, boardRef.current.imageObjects, boardRef.current.theme, selectionRef.current);
+    const renderedBoard = transformPreviewRef.current ?? boardRef.current;
+    drawBoard(
+      context,
+      renderedBoard.strokes,
+      renderedBoard.textObjects,
+      renderedBoard.imageObjects,
+      renderedBoard.theme,
+      selectionRef.current,
+      false,
+      !settings.handwritingFontEnabled,
+    );
     if (currentStroke.current) drawBoard(context, [currentStroke.current], [], [], boardRef.current.theme);
-  }, []);
+  }, [settings.handwritingFontEnabled]);
 
-  useEffect(() => redraw(), [board, view, selection, redraw]);
+  useEffect(() => redraw(), [board, transformPreview, view, selection, redraw]);
 
   useEffect(() => {
     window.addEventListener("whiteboard-image-loaded", redraw);
@@ -485,6 +649,89 @@ function App() {
     setSelection(new Set());
   }, [commitBoard]);
 
+  function beginSelectionTransform(mode: "move" | "resize", point: Point) {
+    const bounds = selectedContentBounds(boardRef.current, selectionRef.current);
+    if (!bounds) return false;
+    selectionTransformRef.current = {
+      mode,
+      start: point,
+      bounds,
+      original: cloneBoard(boardRef.current),
+      ids: new Set(selectionRef.current),
+      changed: false,
+    };
+    return true;
+  }
+
+  function updateSelectionTransform(point: Point) {
+    const transform = selectionTransformRef.current;
+    if (!transform) return;
+    let preview: BoardDocument;
+    if (transform.mode === "move") {
+      preview = transformSelection(
+        transform.original,
+        transform.ids,
+        transform.bounds,
+        point.x - transform.start.x,
+        point.y - transform.start.y,
+      );
+    } else {
+      const diagonalX = transform.bounds.width;
+      const diagonalY = transform.bounds.height;
+      const pointerX = point.x - transform.bounds.x;
+      const pointerY = point.y - transform.bounds.y;
+      const denominator = diagonalX * diagonalX + diagonalY * diagonalY;
+      const scale = Math.min(20, Math.max(0.1, denominator > 0 ? (pointerX * diagonalX + pointerY * diagonalY) / denominator : 1));
+      preview = transformSelection(transform.original, transform.ids, transform.bounds, 0, 0, scale, scale);
+    }
+    transform.changed = true;
+    transformPreviewRef.current = preview;
+    setTransformPreview(preview);
+  }
+
+  function finishSelectionTransform() {
+    const transform = selectionTransformRef.current;
+    const preview = transformPreviewRef.current;
+    selectionTransformRef.current = null;
+    transformPreviewRef.current = null;
+    setTransformPreview(null);
+    if (transform?.changed && preview) commitBoard(preview);
+  }
+
+  function cancelSelectionTransform() {
+    selectionTransformRef.current = null;
+    transformPreviewRef.current = null;
+    setTransformPreview(null);
+  }
+
+  function clearBoardScope() {
+    if (clearScope === "board") {
+      commitBoard({ ...boardRef.current, strokes: [], textObjects: [], imageObjects: [] });
+    } else {
+      const rect = canvasRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const bounds = {
+        x: -viewRef.current.x / viewRef.current.scale,
+        y: -viewRef.current.y / viewRef.current.scale,
+        width: rect.width / viewRef.current.scale,
+        height: rect.height / viewRef.current.scale,
+      };
+      const visibleIds = selectedBoardIds(boardRef.current, bounds);
+      if (!visibleIds.size) {
+        setClearMenuOpen(false);
+        return;
+      }
+      commitBoard({
+        ...boardRef.current,
+        strokes: boardRef.current.strokes.filter((item) => !visibleIds.has(item.id)),
+        textObjects: boardRef.current.textObjects.filter((item) => !visibleIds.has(item.id)),
+        imageObjects: boardRef.current.imageObjects.filter((item) => !visibleIds.has(item.id)),
+      });
+    }
+    setSelection(new Set());
+    setClearMenuOpen(false);
+  }
+
   const finishMousepadStroke = useCallback(() => {
     const stroke = currentStroke.current;
     if (!stroke || stroke.pointerType !== "mousepad-capture") return;
@@ -606,7 +853,11 @@ function App() {
       else if (event.key === "Escape") {
         setSelection(new Set());
         setRecognitionOpen(false);
+        setRecognitionHighlight(null);
         setPracticeOpen(false);
+        setTextEditor(null);
+        setClearMenuOpen(false);
+        cancelSelectionTransform();
         stopMousepadCapture();
       } else if (event.key === "Delete" && selectionRef.current.size) {
         deleteSelection();
@@ -650,15 +901,21 @@ function App() {
       eraseOrigin.current = cloneBoard(boardRef.current);
       eraseAt(point.x, point.y);
     } else if (tool === "select") {
-      selectionOrigin.current = point;
-      setSelectionBox({ x: point.x, y: point.y, width: 0, height: 0 });
+      const bounds = selectedContentBounds(boardRef.current, selectionRef.current);
+      if (bounds && point.x >= bounds.x && point.x <= bounds.x + bounds.width && point.y >= bounds.y && point.y <= bounds.y + bounds.height) {
+        beginSelectionTransform("move", point);
+      } else {
+        setSelection(new Set());
+        selectionOrigin.current = point;
+        setSelectionBox({ x: point.x, y: point.y, width: 0, height: 0 });
+      }
     } else if (tool === "hand") {
       dragOrigin.current = {
         point: { ...point, x: clientX, y: clientY },
         view: viewRef.current,
       };
     } else {
-      editTextAt(point);
+      editTextAt(point, clientX, clientY);
     }
   }
 
@@ -676,6 +933,8 @@ function App() {
         redoStack.current = [];
         setBoard({ ...boardRef.current, updatedAt: new Date().toISOString() });
       }
+    } else if (selectionTransformRef.current) {
+      finishSelectionTransform();
     } else if (selectionOrigin.current) {
       const start = selectionOrigin.current;
       const bounds = {
@@ -691,31 +950,49 @@ function App() {
     dragOrigin.current = null;
   }
 
-  function editTextAt(point: Point) {
+  function editTextAt(point: Point, clientX: number, clientY: number) {
     const existing = [...boardRef.current.textObjects].reverse().find((item) =>
       point.x >= item.x - 8 && point.x <= item.x + 280
       && point.y >= item.y - 8 && point.y <= item.y + Math.max(28, item.value.split("\n").length * 28),
     );
-    const value = window.prompt(existing ? "Edit text" : "Text to add", existing?.value ?? "");
-    if (!value?.trim()) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    setTextEditor({
+      kind: existing?.kind ?? "text",
+      value: existing?.value ?? "",
+      boardX: existing?.x ?? point.x,
+      boardY: existing?.y ?? point.y,
+      anchorX: clientX - (rect?.left ?? 0),
+      anchorY: clientY - (rect?.top ?? 0),
+      targetId: existing?.id,
+    });
+  }
+
+  function saveTextEditor() {
+    if (!textEditor?.value.trim()) return;
+    const value = textEditor.value.trim();
     commitBoard({
       ...boardRef.current,
-      textObjects: existing
-        ? boardRef.current.textObjects.map((item) => item.id === existing.id ? { ...item, value: value.trim() } : item)
+      textObjects: textEditor.targetId
+        ? boardRef.current.textObjects.map((item) => item.id === textEditor.targetId ? { ...item, value } : item)
         : [...boardRef.current.textObjects, {
           id: crypto.randomUUID(),
-          x: point.x,
-          y: point.y,
-          value: value.trim(),
+          x: textEditor.boardX,
+          y: textEditor.boardY,
+          value,
           color,
-          kind: "text",
+          kind: textEditor.kind,
         }],
     });
+    setTextEditor(null);
   }
 
   function startPointer(event: React.PointerEvent<HTMLCanvasElement>) {
     if (keyboardPointerAction.current) return;
     if (event.button !== 0 && event.button !== 1 && event.button !== 2) return;
+    if (trackpadOpen && document.pointerLockElement === event.currentTarget) {
+      event.preventDefault();
+      return;
+    }
     const button = event.button;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -739,6 +1016,7 @@ function App() {
 
     if (pointerPositions.current.size === 2) {
       currentStroke.current = null;
+      cancelSelectionTransform();
       const [a, b] = [...pointerPositions.current.values()];
       pinchOrigin.current = {
         distance: Math.hypot(a.x - b.x, a.y - b.y),
@@ -762,8 +1040,8 @@ function App() {
       const rect = event.currentTarget.getBoundingClientRect();
       const previous = mousepadCursorRef.current ?? { x: rect.width / 2, y: rect.height / 2 };
       const cursor = {
-        x: Math.min(rect.width, Math.max(0, previous.x + event.movementX)),
-        y: Math.min(rect.height, Math.max(0, previous.y + event.movementY)),
+        x: Math.min(rect.width, Math.max(0, previous.x + event.movementX * 1.35)),
+        y: Math.min(rect.height, Math.max(0, previous.y + event.movementY * 1.35)),
       };
       mousepadCursorRef.current = cursor;
       setMousepadCursor(cursor);
@@ -773,7 +1051,9 @@ function App() {
         pressure: 0.5,
         time: Date.now(),
       };
-      if (!currentStroke.current) {
+      if ((event.buttons & 1) === 0) {
+        finishMousepadStroke();
+      } else if (!currentStroke.current) {
         currentStroke.current = {
           id: crypto.randomUUID(),
           color,
@@ -789,7 +1069,9 @@ function App() {
       return;
     }
     if (keyboardPointerAction.current) {
-      if (keyboardPointerAction.current === "left" && currentStroke.current) {
+      if (keyboardPointerAction.current === "left" && selectionTransformRef.current) {
+        updateSelectionTransform(hoverPoint);
+      } else if (keyboardPointerAction.current === "left" && currentStroke.current) {
         currentStroke.current.points.push(hoverPoint);
         redraw();
       } else if (keyboardPointerAction.current === "left" && eraseOrigin.current) {
@@ -824,7 +1106,9 @@ function App() {
     }
 
     const point = hoverPoint;
-    if (currentStroke.current) {
+    if (selectionTransformRef.current) {
+      updateSelectionTransform(point);
+    } else if (currentStroke.current) {
       currentStroke.current.points.push(point);
       redraw();
     } else if (eraseOrigin.current) {
@@ -863,6 +1147,7 @@ function App() {
     eraseOrigin.current = null;
     selectionOrigin.current = null;
     dragOrigin.current = null;
+    cancelSelectionTransform();
     setSelectionBox(null);
     redraw();
   }
@@ -901,6 +1186,7 @@ function App() {
       setBoard(next);
       setFilePath(path);
       setSelection(new Set());
+      setTextEditor(null);
       undoStack.current = [];
       redoStack.current = [];
       fitBoard();
@@ -959,20 +1245,17 @@ function App() {
   }
 
   function insertLatex() {
-    const value = window.prompt("LaTeX to add", String.raw`\frac{a}{b}`)?.trim();
-    if (!value) return;
     const canvas = canvasRef.current;
     const rect = canvas?.getBoundingClientRect();
-    commitBoard({
-      ...boardRef.current,
-      textObjects: [...boardRef.current.textObjects, {
-        id: crypto.randomUUID(),
-        x: ((rect?.width ?? 640) / 2 - viewRef.current.x) / viewRef.current.scale,
-        y: ((rect?.height ?? 480) / 2 - viewRef.current.y) / viewRef.current.scale,
-        value,
-        color,
-        kind: "latex",
-      }],
+    const anchorX = (rect?.width ?? 640) / 2;
+    const anchorY = Math.min((rect?.height ?? 480) / 2, 220);
+    setTextEditor({
+      kind: "latex",
+      value: "",
+      boardX: (anchorX - viewRef.current.x) / viewRef.current.scale,
+      boardY: ((rect?.height ?? 480) / 2 - viewRef.current.y) / viewRef.current.scale,
+      anchorX,
+      anchorY,
     });
   }
 
@@ -998,6 +1281,7 @@ function App() {
         setBoard(parseBoard(boardJson));
         setFilePath(null);
         setSelection(new Set());
+        setTextEditor(null);
         undoStack.current = [];
         redoStack.current = [];
         fitBoard();
@@ -1054,6 +1338,7 @@ function App() {
     setBoard({ ...createBoard(), theme: board.theme, grid: board.grid });
     setFilePath(null);
     setSelection(new Set());
+    setTextEditor(null);
     undoStack.current = [];
     redoStack.current = [];
     fitBoard();
@@ -1083,6 +1368,7 @@ function App() {
       setBoard(next);
       setFilePath(null);
       setSelection(new Set());
+      setTextEditor(null);
       undoStack.current = [];
       redoStack.current = [];
       setLibraryOpen(false);
@@ -1128,18 +1414,23 @@ function App() {
     setRecognitionMode(mode);
     setRecognitionScope(scope);
     setCorrectionMessage("");
+    setRecognitionHighlight(null);
+    setRecognitionFeedbackSaved(false);
     if (!rendered) {
+      setRecognitionAttempt(null);
       setRecognitionState("error");
       setRecognitionError(scope === "selection" ? "Select some ink first." : "There is no ink in this recognition area.");
       return;
     }
     setRecognitionState("loading");
     setRecognitionError("");
+    setRecognitionAttempt({ image: rendered.base64, bounds: rendered.bounds, mode });
     try {
       const result = await recognizeInk(rendered.base64, mode, settings);
       setRecognitionResult(result);
       setRecognitionOriginal(result);
       setRecognitionState("result");
+      setRecognitionHighlight(rendered.bounds);
     } catch (error) {
       setRecognitionState("error");
       setRecognitionError(`${String(error)} Check the NVIDIA credential and confirm the selected model supports image input.`);
@@ -1166,10 +1457,18 @@ function App() {
   }
 
   function rememberCorrection() {
-    if (!recognitionResult.trim() || recognitionResult.trim() === recognitionOriginal.trim()) return;
+    if (!recognitionAttempt || recognitionFeedbackSaved || !recognitionResult.trim() || recognitionResult.trim() === recognitionOriginal.trim()) return;
     const corrected = recognitionResult.trim();
     setSettings((current) => ({
       ...current,
+      samples: [...current.samples, {
+        id: crypto.randomUUID(),
+        label: corrected,
+        image: recognitionAttempt.image,
+        exercise: "feedback",
+        mode: recognitionAttempt.mode,
+        createdAt: new Date().toISOString(),
+      }].slice(-600),
       corrections: [
         ...current.corrections,
         {
@@ -1182,7 +1481,25 @@ function App() {
       ].slice(-100),
     }));
     setRecognitionOriginal(corrected);
-    setCorrectionMessage("Correction saved. It will be included with future recognition requests.");
+    setRecognitionFeedbackSaved(true);
+    setCorrectionMessage("Correction and visual reference saved for future requests. This does not train the model.");
+  }
+
+  function confirmRecognition() {
+    if (!recognitionAttempt || recognitionFeedbackSaved || !recognitionResult.trim()) return;
+    setSettings((current) => ({
+      ...current,
+      samples: [...current.samples, {
+        id: crypto.randomUUID(),
+        label: recognitionResult.trim(),
+        image: recognitionAttempt.image,
+        exercise: "feedback",
+        mode: recognitionAttempt.mode,
+        createdAt: new Date().toISOString(),
+      }].slice(-600),
+    }));
+    setRecognitionFeedbackSaved(true);
+    setCorrectionMessage("Verified visual reference saved for future requests. This does not train the model.");
   }
 
   function addCalibrationSample() {
@@ -1200,7 +1517,7 @@ function App() {
           mode: calibrationMode,
           createdAt: new Date().toISOString(),
         },
-      ].slice(-240),
+      ].slice(-600),
     }));
     setCalibrationLabel("");
   }
@@ -1267,7 +1584,7 @@ function App() {
           mode: (practiceSet.id === "math" ? "latex" : "text") as RecognitionMode,
           createdAt: new Date().toISOString(),
         },
-      ].slice(-240),
+      ].slice(-600),
     }));
     setPracticeStrokes([]);
     setPracticeIndex((current) => (current + 1) % practiceSet.targets.length);
@@ -1343,7 +1660,7 @@ function App() {
             pressed={practiceOpen}
           ><Student /></IconButton>
           <IconButton
-            label="Mousepad capture (M)"
+            label="Lock cursor (M)"
             onClick={toggleMousepadCapture}
             pressed={trackpadOpen}
           ><DeviceTablet /></IconButton>
@@ -1384,7 +1701,44 @@ function App() {
           data-image-count={board.imageObjects.length}
           aria-label="Whiteboard. Left drag uses the current tool, middle drag pans, right drag selects, and the wheel zooms."
         />
-        {board.textObjects.filter((item) => item.kind === "latex").map((item) => (
+        {settings.handwritingFontEnabled && displayBoard.textObjects.filter((item) => item.kind === "text").map((item) => {
+          const fontSize = item.fontSize ?? 20;
+          return (
+            <div
+              key={item.id}
+              className="handwriting-text-object"
+              style={{
+                left: item.x * view.scale + view.x,
+                top: item.y * view.scale + view.y,
+                color: inkColor(item.color, board.theme),
+                fontSize,
+                transform: `scale(${view.scale})`,
+              }}
+            >
+              {item.value.split("\n").map((line, lineIndex) => (
+                <div key={lineIndex} className="handwriting-line">
+                  {[...line].map((character, characterIndex) => {
+                    const glyph = handwritingGlyphs[character];
+                    return glyph ? (
+                      <span
+                        key={characterIndex}
+                        className="handwriting-glyph"
+                        style={{
+                          width: Math.max(fontSize * 0.35, fontSize * glyph.aspect),
+                          height: fontSize,
+                          backgroundColor: inkColor(item.color, board.theme),
+                          WebkitMaskImage: `url(${glyph.dataUrl})`,
+                          maskImage: `url(${glyph.dataUrl})`,
+                        }}
+                      />
+                    ) : <span key={characterIndex} className="handwriting-fallback">{character}</span>;
+                  })}
+                </div>
+              ))}
+            </div>
+          );
+        })}
+        {displayBoard.textObjects.filter((item) => item.kind === "latex").map((item) => (
           <div
             key={item.id}
             className="latex-board-object"
@@ -1392,6 +1746,7 @@ function App() {
               left: item.x * view.scale + view.x,
               top: item.y * view.scale + view.y,
               color: inkColor(item.color, board.theme),
+              fontSize: item.fontSize ?? 20,
               transform: `scale(${view.scale})`,
             }}
             dangerouslySetInnerHTML={{ __html: katex.renderToString(item.value, { throwOnError: false, trust: false }) }}
@@ -1399,7 +1754,7 @@ function App() {
         ))}
         {trackpadOpen && mousepadCursor && (
           <>
-            <div className="mousepad-capture-status">Mousepad captured - move to write, press M or Esc to stop</div>
+            <div className="mousepad-capture-status">Cursor locked - hold left click to draw, press M or Esc to release</div>
             <div className="mousepad-cursor" style={{ left: mousepadCursor.x, top: mousepadCursor.y }} />
           </>
         )}
@@ -1413,6 +1768,143 @@ function App() {
               height: selectionBox.height * view.scale,
             }}
           />
+        )}
+        {recognitionHighlight && recognitionOpen && (
+          <div
+            className="recognition-highlight"
+            aria-hidden="true"
+            style={{
+              left: recognitionHighlight.x * view.scale + view.x,
+              top: recognitionHighlight.y * view.scale + view.y,
+              width: recognitionHighlight.width * view.scale,
+              height: recognitionHighlight.height * view.scale,
+            }}
+          />
+        )}
+        {selectionBounds && (
+          <div
+            className="selection-transform-box"
+            style={{
+              left: selectionBounds.x * view.scale + view.x,
+              top: selectionBounds.y * view.scale + view.y,
+              width: selectionBounds.width * view.scale,
+              height: selectionBounds.height * view.scale,
+            }}
+            onPointerDown={(event) => {
+              if (event.button !== 0 || event.target !== event.currentTarget) return;
+              event.preventDefault();
+              event.currentTarget.setPointerCapture(event.pointerId);
+              const rect = canvasRef.current?.getBoundingClientRect();
+              if (!rect) return;
+              beginSelectionTransform("move", {
+                x: (event.clientX - rect.left - viewRef.current.x) / viewRef.current.scale,
+                y: (event.clientY - rect.top - viewRef.current.y) / viewRef.current.scale,
+                pressure: 0.5,
+                time: Date.now(),
+              });
+            }}
+            onPointerMove={(event) => {
+              if (!event.currentTarget.hasPointerCapture(event.pointerId) || selectionTransformRef.current?.mode !== "move") return;
+              const rect = canvasRef.current?.getBoundingClientRect();
+              if (!rect) return;
+              updateSelectionTransform({
+                x: (event.clientX - rect.left - viewRef.current.x) / viewRef.current.scale,
+                y: (event.clientY - rect.top - viewRef.current.y) / viewRef.current.scale,
+                pressure: 0.5,
+                time: Date.now(),
+              });
+            }}
+            onPointerUp={(event) => {
+              if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+              event.currentTarget.releasePointerCapture(event.pointerId);
+              finishSelectionTransform();
+            }}
+            onPointerCancel={cancelSelectionTransform}
+          >
+            <button
+              className="selection-resize-handle"
+              aria-label="Resize selection"
+              title="Drag to resize selection"
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                event.currentTarget.setPointerCapture(event.pointerId);
+                const rect = canvasRef.current?.getBoundingClientRect();
+                if (!rect) return;
+                beginSelectionTransform("resize", {
+                  x: (event.clientX - rect.left - viewRef.current.x) / viewRef.current.scale,
+                  y: (event.clientY - rect.top - viewRef.current.y) / viewRef.current.scale,
+                  pressure: 0.5,
+                  time: Date.now(),
+                });
+              }}
+              onPointerMove={(event) => {
+                if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                const rect = canvasRef.current?.getBoundingClientRect();
+                if (!rect) return;
+                updateSelectionTransform({
+                  x: (event.clientX - rect.left - viewRef.current.x) / viewRef.current.scale,
+                  y: (event.clientY - rect.top - viewRef.current.y) / viewRef.current.scale,
+                  pressure: 0.5,
+                  time: Date.now(),
+                });
+              }}
+              onPointerUp={(event) => {
+                if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+                finishSelectionTransform();
+              }}
+              onPointerCancel={cancelSelectionTransform}
+            />
+          </div>
+        )}
+        {textEditor && (
+          <form
+            className="text-editor-popover"
+            role="dialog"
+            aria-labelledby="text-editor-title"
+            style={{
+              left: `clamp(12px, ${textEditor.anchorX + 12}px, calc(100% - 344px))`,
+              top: `clamp(12px, ${textEditor.anchorY + 12}px, calc(100% - 300px))`,
+            }}
+            onSubmit={(event) => {
+              event.preventDefault();
+              saveTextEditor();
+            }}
+          >
+            <div className="text-editor-header">
+              <div>
+                <strong id="text-editor-title">{textEditor.targetId ? "Edit" : "Add"} {textEditor.kind === "latex" ? "LaTeX" : "text"}</strong>
+                <span>{textEditor.kind === "latex" ? "Write an equation using LaTeX." : "Add a note directly to the board."}</span>
+              </div>
+              <button type="button" className="icon-button" aria-label="Cancel text editing" title="Cancel text editing" onClick={() => setTextEditor(null)}><X /></button>
+            </div>
+            <textarea
+              autoFocus
+              aria-label={textEditor.kind === "latex" ? "LaTeX source" : "Text content"}
+              rows={textEditor.kind === "latex" ? 3 : 4}
+              placeholder={textEditor.kind === "latex" ? String.raw`\frac{a}{b}` : "Type here"}
+              value={textEditor.value}
+              onChange={(event) => setTextEditor((current) => current ? { ...current, value: event.target.value } : current)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setTextEditor(null);
+                else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) event.currentTarget.form?.requestSubmit();
+              }}
+            />
+            {textEditor.kind === "latex" && textEditor.value.trim() && (
+              <div
+                className="text-editor-preview"
+                aria-label="LaTeX preview"
+                dangerouslySetInnerHTML={{ __html: katex.renderToString(textEditor.value, { throwOnError: false, trust: false }) }}
+              />
+            )}
+            <div className="text-editor-actions">
+              <span>Ctrl+Enter to save</span>
+              <button type="button" className="text-button" onClick={() => setTextEditor(null)}>Cancel</button>
+              <button type="submit" className="primary-button" disabled={!textEditor.value.trim()}>
+                {textEditor.targetId ? "Save changes" : textEditor.kind === "latex" ? "Insert LaTeX" : "Insert text"}
+              </button>
+            </div>
+          </form>
         )}
         {!board.strokes.length && !board.textObjects.length && !board.imageObjects.length && (
           <div className="empty-state">
@@ -1429,7 +1921,15 @@ function App() {
       </section>
 
       <nav className="tool-dock" aria-label="Drawing tools">
-        <div className="tool-group">
+        <div
+          className="tool-group"
+          onWheel={(event) => {
+            event.preventDefault();
+            const tools: Tool[] = ["select", "pen", "eraser", "hand", "text"];
+            const index = tools.indexOf(tool);
+            setTool(tools[(index + (event.deltaY > 0 ? 1 : -1) + tools.length) % tools.length]);
+          }}
+        >
           <ToolButton tool="select" active={tool === "select"} label="Select (V)" onClick={setTool}><Selection /></ToolButton>
           <ToolButton tool="pen" active={tool === "pen"} label="Pen (P)" onClick={setTool}><PencilSimple /></ToolButton>
           <ToolButton tool="eraser" active={tool === "eraser"} label="Eraser (E)" onClick={setTool}><Eraser /></ToolButton>
@@ -1461,16 +1961,31 @@ function App() {
         <IconButton label="Redo (Ctrl+Y)" onClick={redo} disabled={!redoStack.current.length}><ArrowClockwise /></IconButton>
         <IconButton label="Delete selection (Delete)" onClick={deleteSelection} disabled={!selection.size}><Trash /></IconButton>
         <IconButton
-          label="Clear board"
-          onClick={() => {
-            if (window.confirm("Clear every stroke, text object, and image?")) {
-              commitBoard({ ...board, strokes: [], textObjects: [], imageObjects: [] });
-              setSelection(new Set());
-            }
-          }}
+          label="Clear screen"
+          onClick={() => setClearMenuOpen((current) => !current)}
+          pressed={clearMenuOpen}
           disabled={!board.strokes.length && !board.textObjects.length && !board.imageObjects.length}
         ><Broom /></IconButton>
       </nav>
+
+      {clearMenuOpen && (
+        <section className="clear-menu" role="dialog" aria-labelledby="clear-menu-title">
+          <div className="panel-header">
+            <div>
+              <h2 id="clear-menu-title">Clear content</h2>
+              <p>Choose how much of this whiteboard to remove.</p>
+            </div>
+            <IconButton label="Close clear menu" onClick={() => setClearMenuOpen(false)}><X /></IconButton>
+          </div>
+          <div className="segmented-control clear-scope">
+            <button className={clearScope === "visible" ? "active" : ""} onClick={() => setClearScope("visible")}>Visible screen</button>
+            <button className={clearScope === "board" ? "active" : ""} onClick={() => setClearScope("board")}>Entire board</button>
+          </div>
+          <button className="danger-button clear-confirm" onClick={clearBoardScope}>
+            {clearScope === "visible" ? "Clear visible screen" : "Clear entire board"}
+          </button>
+        </section>
+      )}
 
       {recognitionOpen && (
         <aside className="side-panel recognition-panel" aria-label="Recognition results">
@@ -1479,7 +1994,10 @@ function App() {
               <h2>Recognition</h2>
               <p>{recognitionScope === "visible" ? "Visible grid-aligned area" : recognitionScope === "selection" ? `${selectedStrokes.length} selected strokes` : "Entire board"}</p>
             </div>
-            <IconButton label="Close recognition" onClick={() => setRecognitionOpen(false)}><X /></IconButton>
+            <IconButton label="Close recognition" onClick={() => {
+              setRecognitionOpen(false);
+              setRecognitionHighlight(null);
+            }}><X /></IconButton>
           </div>
           <div className="segmented-control">
             <button className={recognitionMode === "text" ? "active" : ""} onClick={() => runRecognition("text")}>Text</button>
@@ -1512,7 +2030,8 @@ function App() {
               <div className="panel-actions">
                 <button className="primary-button" onClick={insertRecognition}>Insert below ink</button>
                 <button className="text-button" onClick={() => navigator.clipboard.writeText(recognitionResult)}>Copy</button>
-                <button className="text-button" onClick={rememberCorrection} disabled={recognitionResult.trim() === recognitionOriginal.trim()}>Save correction</button>
+                <button className="text-button" onClick={confirmRecognition} disabled={recognitionFeedbackSaved || recognitionResult.trim() !== recognitionOriginal.trim()}>Looks correct</button>
+                <button className="text-button" onClick={rememberCorrection} disabled={recognitionFeedbackSaved || recognitionResult.trim() === recognitionOriginal.trim()}>Save correction</button>
               </div>
               {correctionMessage && <p className="practice-message" aria-live="polite">{correctionMessage}</p>}
               <p className="fine-print">Review recognition before using it. Original ink is never removed automatically.</p>
@@ -1741,7 +2260,7 @@ function App() {
                   />
                 </label>
               </div>
-              <p className="fine-print">Focus a field and press one or more keys to add them. Backspace removes the last key, Delete clears the field, and M is reserved for mousepad capture.</p>
+              <p className="fine-print">Focus a field and press one or more keys to add them. Backspace removes the last key, Delete clears the field, and M is reserved for cursor lock.</p>
             </div>
             <div className="settings-section">
               <h3>Handwriting profile</h3>
@@ -1769,6 +2288,19 @@ function App() {
                   setTool("pen");
                 }}
               >Start guided practice</button>
+              <div className="font-progress">
+                <div>
+                  <strong>Experimental handwriting text</strong>
+                  <span>{handwritingCoverage}/26 lowercase letters have 5 samples</span>
+                </div>
+                <button
+                  className="text-button"
+                  disabled={!handwritingFontReady}
+                  aria-pressed={settings.handwritingFontEnabled}
+                  onClick={() => setSettings((current) => ({ ...current, handwritingFontEnabled: !current.handwritingFontEnabled }))}
+                >{settings.handwritingFontEnabled ? "Use system font" : "Use my handwriting"}</button>
+              </div>
+              <p className="fine-print">When unlocked, lowercase letters use your latest guided samples on the board. Other characters and PNG export use the system-font fallback.</p>
               <div className="sample-summary">
                 <span>{settings.samples.length} samples</span>
                 <span>{settings.corrections.length} corrections</span>
