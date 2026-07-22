@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test:e2e": "node tests/smoke.mjs && node tests/native-storage.mjs",
+    "test:e2e": "node tests/smoke.mjs && node tests/native-storage.mjs && node tests/spatial-index.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },
