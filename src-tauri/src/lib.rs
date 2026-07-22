@@ -1109,10 +1109,11 @@ mod tests {
         encrypt_external_board_path, ensure_private_library_directory, library_metadata_path,
         list_library_page, open_bounded_regular_file, parse_board_identity,
         read_bounded_regular_bytes, read_bounded_regular_file, read_external_board_path,
-        read_external_image_path, read_private_credential_file, valid_image_payload,
-        valid_model_name, validate_json, validate_library_board, validate_png_export,
-        write_board_atomically, write_external_png_path, write_library_metadata,
-        write_private_new_file, ChatRequest, LibraryBoardMetadata, LIBRARY_PAGE_SIZE,
+        read_external_image_path, read_private_credential_file, valid_board_id,
+        valid_image_payload, valid_model_name, validate_json, validate_library_board,
+        validate_png_export, write_board_atomically, write_external_png_path,
+        write_library_metadata, write_private_new_file, ChatRequest, LibraryBoardMetadata,
+        LIBRARY_PAGE_SIZE,
         MAX_API_RESPONSE_BYTES, MAX_BOARD_BYTES, MAX_CREDENTIAL_FILE_BYTES,
         MAX_CREDENTIAL_VALUE_BYTES, MAX_ENCRYPTED_BOARD_BYTES, MAX_IMAGE_FILE_BYTES,
         MAX_PNG_EXPORT_BYTES, MAX_PROFILE_IMAGE_BASE64_BYTES, MAX_RECOGNITION_IMAGE_BASE64_BYTES,
@@ -1172,6 +1173,43 @@ mod tests {
             board
         );
         assert!(decrypt_board(encrypted, "wrong password".to_string()).is_err());
+    }
+
+    #[test]
+    fn tampered_ciphertext_is_rejected_in_body_and_tag() {
+        let board = r#"{"version":1,"id":"test-board"}"#;
+        let password = "correct horse battery staple".to_string();
+        let encrypted = encrypt_board(board.to_string(), password.clone()).unwrap();
+
+        // Flip a byte in the encrypted body (right after the header).
+        let mut tampered_body = encrypted.clone();
+        let body_index = tampered_body.len() - 5;
+        tampered_body[body_index] ^= 0x01;
+        assert!(decrypt_board(tampered_body, password.clone()).is_err());
+
+        // Flip a byte in the trailing GCM authentication tag.
+        let mut tampered_tag = encrypted.clone();
+        let tag_index = tampered_tag.len() - 1;
+        tampered_tag[tag_index] ^= 0x01;
+        assert!(decrypt_board(tampered_tag, password.clone()).is_err());
+
+        // Sanity check: the untampered ciphertext still decrypts.
+        assert_eq!(decrypt_board(encrypted, password).unwrap(), board);
+    }
+
+    #[test]
+    fn board_ids_reject_path_traversal_and_absolute_paths() {
+        assert!(valid_board_id("valid-board-id-123"));
+        assert!(!valid_board_id(""));
+        assert!(!valid_board_id(".."));
+        assert!(!valid_board_id("../etc/passwd"));
+        assert!(!valid_board_id("../../secrets"));
+        assert!(!valid_board_id("/etc/passwd"));
+        assert!(!valid_board_id("boards/../../etc/passwd"));
+        assert!(!valid_board_id("a/b"));
+        assert!(!valid_board_id("a\\b"));
+        assert!(!valid_board_id("board id"));
+        assert!(!valid_board_id(&"a".repeat(81)));
     }
 
     #[test]
