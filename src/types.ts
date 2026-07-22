@@ -6,7 +6,6 @@ export interface Point {
   x: number;
   y: number;
   pressure: number;
-  time: number;
 }
 
 export interface Stroke {

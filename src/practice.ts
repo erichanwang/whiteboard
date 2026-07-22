@@ -62,10 +62,36 @@ export function practiceCount(samples: CalibrationSample[], exercise: string, la
 }
 
 function imageFromBase64(base64: string) {
+  try {
+    const header = atob(base64.slice(0, 32));
+    const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    if (header.length < 24 || !signature.every((value, index) => header.charCodeAt(index) === value)
+      || header.slice(12, 16) !== "IHDR") throw new Error("Invalid PNG header");
+    const dimension = (offset: number) => header.charCodeAt(offset) * 0x1000000
+      + header.charCodeAt(offset + 1) * 0x10000
+      + header.charCodeAt(offset + 2) * 0x100
+      + header.charCodeAt(offset + 3);
+    const width = dimension(16);
+    const height = dimension(20);
+    if (width < 1 || height < 1 || width > 2048 || height > 2048 || width * height > 4_194_304) {
+      throw new Error("Handwriting sample dimensions are too large");
+    }
+  } catch {
+    return Promise.reject(new Error("Could not load a handwriting sample."));
+  }
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error("Could not load a handwriting sample."));
+    image.onload = () => {
+      image.onload = null;
+      image.onerror = null;
+      resolve(image);
+    };
+    image.onerror = () => {
+      image.onload = null;
+      image.onerror = null;
+      image.removeAttribute("src");
+      reject(new Error("Could not load a handwriting sample."));
+    };
     image.src = `data:image/png;base64,${base64}`;
   });
 }
@@ -82,16 +108,12 @@ export async function buildProfileSheet(samples: CalibrationSample[]): Promise<s
   const remaining = Math.max(0, 120 - prioritized.length);
   const repeats = remaining ? samples.filter((sample) => !selectedIds.has(sample.id)).slice(-remaining) : [];
   const selected = [...prioritized, ...repeats].slice(-120);
-  const loaded = await Promise.allSettled(selected.map(async (sample) => ({ sample, image: await imageFromBase64(sample.image) })));
-  const valid = loaded.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
-  if (!valid.length) return null;
   const columns = 8;
   const cellWidth = 140;
   const cellHeight = 100;
-  const rows = Math.ceil(valid.length / columns);
   const canvas = document.createElement("canvas");
   canvas.width = columns * cellWidth;
-  canvas.height = rows * cellHeight;
+  canvas.height = Math.ceil(selected.length / columns) * cellHeight;
   const context = canvas.getContext("2d");
   if (!context) return null;
   context.fillStyle = "#fcfcfa";
@@ -99,7 +121,19 @@ export async function buildProfileSheet(samples: CalibrationSample[]): Promise<s
   context.font = "600 14px system-ui, sans-serif";
   context.textBaseline = "top";
 
-  valid.forEach(({ sample, image }, index) => {
+  let output: HTMLCanvasElement | null = null;
+  try {
+    let validCount = 0;
+    for (const sample of selected) {
+      let image: HTMLImageElement;
+      try {
+        image = await imageFromBase64(sample.image);
+      } catch {
+        continue;
+      }
+      const index = validCount;
+      validCount += 1;
+      try {
       const x = (index % columns) * cellWidth;
       const y = Math.floor(index / columns) * cellHeight;
       context.strokeStyle = "#d7dad5";
@@ -112,7 +146,32 @@ export async function buildProfileSheet(samples: CalibrationSample[]): Promise<s
       const drawWidth = image.width * scale;
       const drawHeight = image.height * scale;
       context.drawImage(image, x + (cellWidth - drawWidth) / 2, y + 30 + (availableHeight - drawHeight) / 2, drawWidth, drawHeight);
-  });
+      } finally {
+        image.onload = null;
+        image.onerror = null;
+        image.removeAttribute("src");
+      }
+    }
 
-  return canvas.toDataURL("image/png").split(",")[1];
+    if (!validCount) return null;
+    const outputHeight = Math.ceil(validCount / columns) * cellHeight;
+    if (outputHeight === canvas.height) return canvas.toDataURL("image/png").split(",")[1];
+    output = document.createElement("canvas");
+    output.width = canvas.width;
+    output.height = outputHeight;
+    const outputContext = output.getContext("2d");
+    if (!outputContext) return null;
+    outputContext.fillStyle = "#fcfcfa";
+    outputContext.fillRect(0, 0, output.width, output.height);
+    outputContext.drawImage(canvas, 0, 0);
+
+    return output.toDataURL("image/png").split(",")[1];
+  } finally {
+    canvas.width = 0;
+    canvas.height = 0;
+    if (output) {
+      output.width = 0;
+      output.height = 0;
+    }
+  }
 }

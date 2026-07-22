@@ -22,6 +22,7 @@ src-tauri/gen/schemas/
 *.pem
 *.key
 *.whiteboard.json
+*.whiteboard.enc
 whiteboards/
 boards/
 .tauri/

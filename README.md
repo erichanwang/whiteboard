@@ -2,7 +2,9 @@
 
 I wanted a whiteboard that opens quickly, feels at home on Ubuntu, and does not turn every note into a cloud account. This is that app: a small Tauri whiteboard for a mouse, touchscreen, stylus, or trackpad.
 
-It is intentionally simple. Draw, erase, zoom, pan, drop in an image, add text or LaTeX, and get back to the work in front of you. Boards autosave locally and can also be opened or saved with the normal system file picker.
+It is intentionally simple. Draw, erase, zoom, pan, drop in an image, add text or LaTeX, and get back to the work in front of you. Boards autosave to the local Board Library; external boards, encrypted snapshots, and PNG exports use native file dialogs where appropriate.
+
+For architecture, data formats, security boundaries, recognition flow, and current limitations, see [Project Overview](docs/PROJECT_OVERVIEW.md).
 
 ## What is in the first release
 
@@ -46,17 +48,19 @@ The clear control lets you remove only content intersecting the visible screen o
 
 ## Boards and privacy
 
-The native Board Library stores boards in Tauri's application-data directory. On Linux, library directories use `0700` permissions and board files use `0600`. The normal Save button writes there without opening a file dialog. Images are embedded in the board document, so a saved board does not retain the original image path.
+The native Board Library stores boards in Tauri's application-data directory. On Linux, library directories use `0700` permissions and board files use `0600`. The normal Save button writes there without opening a file dialog. Successful native autosaves do not duplicate the full board in webview storage; a recovery copy is written only after a native save failure or when the window closes with unsaved changes. Images are embedded in the board document, so a saved board does not retain the original image path.
 
-`Save encrypted board` creates a `.whiteboard.enc` snapshot protected with Argon2id and AES-256-GCM. The passphrase is not stored. The automatic library copy is separate and remains plaintext so it can act as local recovery.
+External board/image imports and encrypted/PNG exports use one-shot Rust dialog commands. The selected filesystem path never enters the webview, and the renderer has no dialog or filesystem plugin permissions.
+
+The Encrypted snapshots control opens or creates a `.whiteboard.enc` copy protected with Argon2id and AES-256-GCM. The passphrase is not stored. The automatic library, temporary crash recovery, and handwriting profile are separate and remain plaintext local data.
 
 No credentials, `.env` files, board documents, or handwriting samples belong in this repository. They are excluded by `.gitignore` and are checked before a release is published.
 
 ## Handwriting recognition
 
-Recognition is optional. The native Rust process reads `NVIDIA_NIM_API_KEY` from the process environment or your local `~/.fcc/.env`; the key is never sent to the React interface or written into a board.
+Recognition is optional. The native Rust process reads `NVIDIA_NIM_API_KEY` from the process environment or your local `~/.fcc/.env`; on Unix, that fallback file must not grant any group or other permissions (for example, use `chmod 600 ~/.fcc/.env`). The key is never sent to the React interface or written into a board.
 
-Recognition starts with the visible, grid-aligned area because that is usually the fastest useful scope. You can switch to selected ink or the whole board. The recognized area receives a light outline. Results stay editable and never replace the original writing automatically. Choose Looks correct to save a positive visual reference, or edit the result and choose Save correction. These local examples guide later requests; they do not train the remote model.
+Recognition starts with the visible, grid-aligned area because that is usually the fastest useful scope. You can switch to selected ink or the whole board. The recognized area receives a light outline. The selected ink image is sent to NVIDIA; later requests may also include correction hints and a reference sheet assembled from local samples. Results stay editable and never replace the original writing automatically. Choose Looks correct to save a positive visual reference, or edit the result and choose Save correction. These examples guide later requests; they do not train the remote model.
 
 The practice screen collects labeled examples for letters, numbers, punctuation, words, and common math symbols. After every lowercase letter has five guided samples, an experimental display mode can compose lowercase board text from your latest samples. Unsupported characters and PNG export retain the system-font fallback. This is a raster glyph renderer, not a generated TTF or local model fine-tuning.
 

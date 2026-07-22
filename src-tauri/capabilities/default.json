@@ -6,12 +6,10 @@
     "main"
   ],
   "permissions": [
-    "core:default",
-    "dialog:default",
-    "fs:default",
-    "fs:allow-read-file",
-    "fs:allow-read-text-file",
-    "fs:allow-write-file",
-    "fs:allow-write-text-file"
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-read-image",
+    "core:image:allow-new",
+    "core:image:allow-rgba",
+    "core:image:allow-size"
   ]
 }
