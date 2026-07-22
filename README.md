@@ -101,6 +101,34 @@ npm run build
 npm run test:e2e
 ```
 
+### Spatial index for hit-testing and viewport culling
+
+Large boards used to hit-test erasing and cull off-screen strokes with a linear scan of every stroke in `src/board.ts`. `eraseStrokesAt` and `drawBoard`'s viewport culling (and the rectangular-selection helper `strokesIntersectingBounds`) now narrow that scan first through a uniform-grid spatial index (`queryStrokeIndices`, cell size 512, cached per strokes array so repeated queries against an unchanged board reuse the same grid). Every consumer still runs the exact same narrow-phase check (`pointHitsStroke`, `overlapsBounds`, `intersectsBounds`) the old linear scan used, so the index only prunes candidates — it never changes which strokes match.
+
+Run the equivalence test (asserts the spatial index returns exactly the same strokes as a linear scan, over 300 randomized point/bounds/viewport queries plus edge cases):
+
+```bash
+npm run dev -- --host 127.0.0.1   # in one terminal
+node tests/spatial-index.mjs      # in another
+```
+
+Run the throughput benchmark (headless Chromium, 1K/10K/50K/100K strokes, linear scan vs the spatial index, pure hit-test/cull selection cost with no canvas painting):
+
+```bash
+node tests/spatial-index-bench.mjs
+```
+
+Measured on this machine (microseconds per operation; "warm" reuses one strokes array across repeated queries, as happens across repeated erase samples or redraws while panning; "cold" rebuilds the index every call, i.e. right after an edit):
+
+| Strokes | Linear hit-test | Spatial hit-test (warm) | Spatial hit-test (cold) | Warm speedup | Linear cull | Spatial cull (warm) | Spatial cull (cold) | Warm speedup |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1,000 | 63-67 us | 16-17 us | 535-605 us | ~4x | 342-418 us | 6.5-7.5 us | 595-640 us | ~45-65x |
+| 10,000 | 538-560 us | 47-53 us | 2,675-3,340 us | ~11x | 1,493-1,908 us | 9-12 us | 1,875-3,030 us | ~166x |
+| 50,000 | 2,709-3,154 us | 216-248 us | 13,070-13,525 us | ~11-15x | 6,209-6,633 us | 39-47 us | 14,870-18,255 us | ~134-170x |
+| 100,000 | 6,503-7,934 us | 669-974 us | 31,160-35,025 us | ~7-12x | 11,731-14,251 us | 65-87 us | 26,685-35,385 us | ~164-181x |
+
+Both linear scan and the spatial index grow with stroke count, but the index's warm cost grows much more slowly because a query only touches strokes near the query point/viewport instead of every stroke on the board. The cold cost (index rebuilt every call) is higher than a single linear scan at these sizes, so the win comes from reusing the cached index across the many repeated queries a real editing session issues before the strokes array changes (panning redraws, successive erase samples along a drag).
+
 The first release is focused on a dependable local canvas. It does not include cloud sync, collaboration, or a background service that reads raw Linux input devices.
 
 ## License
