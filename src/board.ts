@@ -737,6 +737,59 @@ export function drawBoard(
   }
 }
 
+// Offscreen layer cache used by the main canvas's per-frame draw: the caller
+// paints its "static" layer (everything except whatever changes every frame,
+// e.g. the in-progress stroke) into an offscreen canvas only when `signature`
+// differs from the one used last time, then blits that canvas onto `context`.
+// Repainting is what leaves stale pixels behind if done wrong, so keep the
+// invalidation rule in one place: any signature entry changing (a different
+// strokes array, a different view, a resize) forces a full repaint, never a
+// partial one.
+export type LayerCache = { canvas: HTMLCanvasElement | null; signature: unknown[] | null };
+
+export function createLayerCache(): LayerCache {
+  return { canvas: null, signature: null };
+}
+
+export function paintLayerCache(
+  cache: LayerCache,
+  context: CanvasRenderingContext2D,
+  pixelWidth: number,
+  pixelHeight: number,
+  dpr: number,
+  view: { x: number; y: number; scale: number },
+  signature: unknown[],
+  paint: (offscreenContext: CanvasRenderingContext2D) => void,
+) {
+  let canvas = cache.canvas;
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    cache.canvas = canvas;
+  }
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+    cache.signature = null;
+  }
+  const previous = cache.signature;
+  const changed = !previous || previous.length !== signature.length
+    || signature.some((value, index) => value !== previous[index]);
+  if (changed) {
+    const offscreenContext = canvas.getContext("2d");
+    if (offscreenContext) {
+      offscreenContext.setTransform(1, 0, 0, 1, 0, 0);
+      offscreenContext.clearRect(0, 0, canvas.width, canvas.height);
+      offscreenContext.setTransform(dpr * view.scale, 0, 0, dpr * view.scale, dpr * view.x, dpr * view.y);
+      paint(offscreenContext);
+    }
+    cache.signature = signature;
+  }
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(canvas, 0, 0);
+  context.setTransform(dpr * view.scale, 0, 0, dpr * view.scale, dpr * view.x, dpr * view.y);
+}
+
 export function renderSelectionImage(strokes: Stroke[], theme: BoardTheme, cropBounds?: Bounds): { base64: string; bounds: Bounds } | null {
   const contentBounds = strokeBounds(strokes);
   if (!contentBounds) return null;

@@ -38,11 +38,13 @@ import {
   appendStrokePoint,
   canvasPixelRatio,
   createBoard,
+  createLayerCache,
   defaultBoardTitle,
   drawBoard,
   drawGrid,
   eraseStrokesAt,
   inkColor,
+  paintLayerCache,
   parseBoard,
   pruneImageCache,
   renderSelectionImage,
@@ -713,6 +715,8 @@ function App() {
   const selectionTransformRef = useRef<SelectionTransform | null>(null);
   const transformPreviewRef = useRef<SelectionTransformPreview | null>(null);
   const redrawFrameRef = useRef<number | null>(null);
+  const layerCacheRef = useRef(createLayerCache());
+  const imageLoadVersionRef = useRef(0);
   const handwritingGlyphCacheRef = useRef(new Map<string, HandwritingGlyphCacheEntry>());
   const handwritingGlyphsRef = useRef<Record<string, HandwritingGlyph>>({});
   const startupStartedAtRef = useRef(performance.now());
@@ -843,45 +847,62 @@ function App() {
     }
     const context = canvas.getContext("2d");
     if (!context) return;
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.clearRect(0, 0, canvas.width, canvas.height);
-    context.setTransform(
-      dpr * viewRef.current.scale,
-      0,
-      0,
-      dpr * viewRef.current.scale,
-      dpr * viewRef.current.x,
-      dpr * viewRef.current.y,
-    );
     const visibleBounds = {
       x: -viewRef.current.x / viewRef.current.scale,
       y: -viewRef.current.y / viewRef.current.scale,
       width: rect.width / viewRef.current.scale,
       height: rect.height / viewRef.current.scale,
     };
-    if (boardRef.current.grid) {
-      drawGrid(
-        context,
-        visibleBounds,
-        boardRef.current.theme,
-        viewRef.current.scale,
-      );
-    }
+
+    // Offscreen layer cache: the committed board (everything except the
+    // in-progress stroke, or the un-transformed rest of the board while
+    // dragging a selection) is repainted only when its own inputs change,
+    // then blitted here every frame. The hot path - adding points to the
+    // stroke being drawn, or nudging a selection preview - touches neither
+    // the strokes array nor the view, so most frames just blit and skip
+    // re-walking every visible stroke.
     const transform = selectionTransformRef.current;
     const preview = transformPreviewRef.current;
+    const activeTransform = !!(transform && preview);
+    const staticStrokes = activeTransform ? transform!.unselectedStrokes : boardRef.current.strokes;
+    const staticTextObjects = activeTransform ? transform!.unselectedTextObjects : boardRef.current.textObjects;
+    const staticImageObjects = activeTransform ? transform!.unselectedImageObjects : boardRef.current.imageObjects;
+    const staticSelection = activeTransform ? EMPTY_SELECTION : selectionRef.current;
+    const staticTheme = activeTransform ? transform!.original.theme : boardRef.current.theme;
+    const staticGrid = boardRef.current.grid;
+    const signature = [
+      staticStrokes, staticTextObjects, staticImageObjects, staticSelection,
+      staticTheme, staticGrid,
+      viewRef.current.x, viewRef.current.y, viewRef.current.scale,
+      settings.handwritingFontEnabled, imageLoadVersionRef.current,
+    ];
+
+    paintLayerCache(
+      layerCacheRef.current,
+      context,
+      pixelWidth,
+      pixelHeight,
+      dpr,
+      viewRef.current,
+      signature,
+      (offscreenContext) => {
+        if (staticGrid) drawGrid(offscreenContext, visibleBounds, boardRef.current.theme, viewRef.current.scale);
+        drawBoard(
+          offscreenContext,
+          staticStrokes,
+          staticTextObjects,
+          staticImageObjects,
+          staticTheme,
+          staticSelection,
+          false,
+          !settings.handwritingFontEnabled,
+          visibleBounds,
+        );
+      },
+    );
+
     if (transform && preview) {
       const board = transform.original;
-      drawBoard(
-        context,
-        transform.unselectedStrokes,
-        transform.unselectedTextObjects,
-        transform.unselectedImageObjects,
-        board.theme,
-        EMPTY_SELECTION,
-        false,
-        !settings.handwritingFontEnabled,
-        visibleBounds,
-      );
       const averageScale = (preview.scaleX + preview.scaleY) / 2;
       const selectedStrokes = transform.selectedStrokes.some((item) => item.width * averageScale < 1)
         ? transform.selectedStrokes.map((item) => item.width * averageScale >= 1 ? item : { ...item, width: 1 / averageScale })
@@ -918,18 +939,6 @@ function App() {
         selectedVisibleBounds,
       );
       context.restore();
-    } else {
-      drawBoard(
-        context,
-        boardRef.current.strokes,
-        boardRef.current.textObjects,
-        boardRef.current.imageObjects,
-        boardRef.current.theme,
-        selectionRef.current,
-        false,
-        !settings.handwritingFontEnabled,
-        visibleBounds,
-      );
     }
     if (currentStroke.current) drawBoard(context, [currentStroke.current], [], [], boardRef.current.theme);
   }, [settings.handwritingFontEnabled]);
@@ -958,8 +967,17 @@ function App() {
   useEffect(() => () => pruneImageCache([]), []);
 
   useEffect(() => {
-    window.addEventListener("whiteboard-image-loaded", redraw);
-    return () => window.removeEventListener("whiteboard-image-loaded", redraw);
+    // An image finishing its async load doesn't change any board reference,
+    // so it wouldn't otherwise change the layer-cache signature below - the
+    // cached layer would keep blitting the pre-load (blank) frame forever.
+    // Bumping this counter forces one repaint once the image is actually
+    // ready to draw.
+    const onImageLoaded = () => {
+      imageLoadVersionRef.current += 1;
+      redraw();
+    };
+    window.addEventListener("whiteboard-image-loaded", onImageLoaded);
+    return () => window.removeEventListener("whiteboard-image-loaded", onImageLoaded);
   }, [redraw]);
 
   const redrawPractice = useCallback(() => {
