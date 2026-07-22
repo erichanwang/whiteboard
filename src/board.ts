@@ -182,15 +182,50 @@ export function parseBoard(value: string): BoardDocument {
 // region. It is a broad-phase filter only: every consumer still runs the same
 // exact narrow-phase check (pointHitsStroke / overlapsBounds / intersectsBounds)
 // that the plain linear scan uses, so results are identical by construction.
+//
+// The index is cached in a WeakMap keyed on the strokes array's identity.
+// Because the app treats board.strokes as immutable (every edit produces a
+// new array), a naive cache would throw the whole index away and rebuild it
+// from scratch on every single edit - including drawing one stroke or erasing
+// one stroke, which are by far the hottest mutations. addStroke and
+// eraseStrokesAt below patch the existing index in place instead: they mutate
+// the cells/strokeCells maps of the OLD array's index, delete the OLD array's
+// cache entry (so it rebuilds correctly if it's ever revisited, e.g. via
+// undo), and re-register the same, now-updated index object under the NEW
+// array's identity. That makes both operations cost O(cells the stroke
+// touches), not O(n). Bulk operations that don't go through these helpers
+// (loading a board, clearing the board, transforming a selection) still miss
+// the cache and pay a full rebuild, which is intentional - see task point 4.
 const SPATIAL_CELL_SIZE = 512;
 
 type StrokeIndex = {
   cellSize: number;
-  cells: Map<string, number[]>;
+  cells: Map<string, Stroke[]>;
+  // Which cell keys each stroke occupies, so a single stroke can be removed
+  // from the index without scanning every bucket to find it.
+  strokeCells: Map<Stroke, string[]>;
   maxHalfWidth: number;
 };
 
 const strokeIndexCache = new WeakMap<Stroke[], StrokeIndex>();
+
+// Document order is append/remove only (no reordering or insertion-in-the-
+// middle anywhere in the app), so a stroke's first-seen sequence number is a
+// stable, cheap-to-maintain proxy for its position - it lets query results be
+// sorted into document order without storing array indices anywhere, which
+// is what makes incremental removal (below) safe from index-shift bugs.
+const strokeSequence = new WeakMap<Stroke, number>();
+let nextStrokeSequence = 0;
+
+function sequenceFor(stroke: Stroke): number {
+  let sequence = strokeSequence.get(stroke);
+  if (sequence === undefined) {
+    sequence = nextStrokeSequence;
+    nextStrokeSequence += 1;
+    strokeSequence.set(stroke, sequence);
+  }
+  return sequence;
+}
 
 function cellKey(cx: number, cy: number) {
   return `${cx},${cy}`;
@@ -205,29 +240,53 @@ function cellRange(bounds: Bounds, cellSize: number, pad: number) {
   };
 }
 
-function buildStrokeIndex(strokes: Stroke[]): StrokeIndex {
-  const cells = new Map<string, number[]>();
-  let maxHalfWidth = 0;
-  for (let index = 0; index < strokes.length; index += 1) {
-    const stroke = strokes[index];
-    if (!stroke.points.length) continue;
-    maxHalfWidth = Math.max(maxHalfWidth, stroke.width / 2);
-    const bounds = cachedStrokeBounds(stroke);
-    if (!bounds) continue;
-    const { minCx, maxCx, minCy, maxCy } = cellRange(bounds, SPATIAL_CELL_SIZE, 0);
-    for (let cx = minCx; cx <= maxCx; cx += 1) {
-      for (let cy = minCy; cy <= maxCy; cy += 1) {
-        const key = cellKey(cx, cy);
-        let bucket = cells.get(key);
-        if (!bucket) {
-          bucket = [];
-          cells.set(key, bucket);
-        }
-        bucket.push(index);
+function insertStrokeIntoIndex(index: StrokeIndex, stroke: Stroke) {
+  index.maxHalfWidth = Math.max(index.maxHalfWidth, stroke.width / 2);
+  const bounds = cachedStrokeBounds(stroke);
+  if (!bounds) return;
+  sequenceFor(stroke);
+  const { minCx, maxCx, minCy, maxCy } = cellRange(bounds, index.cellSize, 0);
+  const keys: string[] = [];
+  for (let cx = minCx; cx <= maxCx; cx += 1) {
+    for (let cy = minCy; cy <= maxCy; cy += 1) {
+      const key = cellKey(cx, cy);
+      let bucket = index.cells.get(key);
+      if (!bucket) {
+        bucket = [];
+        index.cells.set(key, bucket);
       }
+      bucket.push(stroke);
+      keys.push(key);
     }
   }
-  return { cellSize: SPATIAL_CELL_SIZE, cells, maxHalfWidth };
+  index.strokeCells.set(stroke, keys);
+}
+
+// ponytail: a removed stroke can shrink maxHalfWidth back down, but finding
+// the new max would mean scanning every remaining stroke. Leaving it as-is
+// only makes future queries pad their search slightly wider than strictly
+// necessary - never wrong, just occasionally a little less tight. Revisit if
+// profiling ever shows stale maxHalfWidth actually costs something.
+function removeStrokeFromIndex(index: StrokeIndex, stroke: Stroke) {
+  const keys = index.strokeCells.get(stroke);
+  if (!keys) return;
+  for (const key of keys) {
+    const bucket = index.cells.get(key);
+    if (!bucket) continue;
+    const at = bucket.indexOf(stroke);
+    if (at !== -1) bucket.splice(at, 1);
+    if (!bucket.length) index.cells.delete(key);
+  }
+  index.strokeCells.delete(stroke);
+}
+
+function buildStrokeIndex(strokes: Stroke[]): StrokeIndex {
+  const index: StrokeIndex = { cellSize: SPATIAL_CELL_SIZE, cells: new Map(), strokeCells: new Map(), maxHalfWidth: 0 };
+  for (const stroke of strokes) {
+    if (!stroke.points.length) continue;
+    insertStrokeIntoIndex(index, stroke);
+  }
+  return index;
 }
 
 function strokeIndexFor(strokes: Stroke[]): StrokeIndex {
@@ -239,22 +298,37 @@ function strokeIndexFor(strokes: Stroke[]): StrokeIndex {
   return index;
 }
 
-// Returns the indices (ascending, matching document order) of strokes whose
-// unpadded bounds could fall within `pad` of `bounds`, widened further by the
-// widest stroke's half-width so no stroke that a narrow-phase check could
-// still accept is ever excluded.
-export function queryStrokeIndices(strokes: Stroke[], bounds: Bounds, pad: number): number[] {
+// Appends a stroke without discarding the cached index: if `strokes` has an
+// index cached, patch it in place with just the new stroke's cells and carry
+// it forward to the returned array instead of leaving the next query to
+// rebuild from scratch.
+export function addStroke(strokes: Stroke[], stroke: Stroke): Stroke[] {
+  const next = strokes.concat(stroke);
+  const index = strokeIndexCache.get(strokes);
+  if (index) {
+    strokeIndexCache.delete(strokes);
+    if (stroke.points.length) insertStrokeIntoIndex(index, stroke);
+    strokeIndexCache.set(next, index);
+  }
+  return next;
+}
+
+// Returns strokes whose unpadded bounds could fall within `pad` of `bounds`,
+// widened further by the widest stroke's half-width so no stroke that a
+// narrow-phase check could still accept is ever excluded. Ascending document
+// order, matching what a linear scan would produce.
+export function queryStrokes(strokes: Stroke[], bounds: Bounds, pad: number): Stroke[] {
   const index = strokeIndexFor(strokes);
   const { minCx, maxCx, minCy, maxCy } = cellRange(bounds, index.cellSize, pad + index.maxHalfWidth);
-  const seen = new Set<number>();
+  const seen = new Set<Stroke>();
   for (let cx = minCx; cx <= maxCx; cx += 1) {
     for (let cy = minCy; cy <= maxCy; cy += 1) {
       const bucket = index.cells.get(cellKey(cx, cy));
       if (!bucket) continue;
-      for (const strokeIndex of bucket) seen.add(strokeIndex);
+      for (const stroke of bucket) seen.add(stroke);
     }
   }
-  return [...seen].sort((a, b) => a - b);
+  return [...seen].sort((a, b) => sequenceFor(a) - sequenceFor(b));
 }
 
 const imageCache = new Map<string, HTMLImageElement>();
@@ -428,28 +502,36 @@ export function eraseStrokesAtLinear(strokes: Stroke[], x: number, y: number, ra
   return remaining ?? strokes;
 }
 
+// Erases in place on the index: the erased strokes are removed from just the
+// cells they occupy (found via strokeCells, no bucket scan needed) and the
+// patched index is carried forward to the returned array, same trick as
+// addStroke. The old array's cache entry is deleted rather than left stale,
+// so anything that still holds that array (e.g. the undo stack) rebuilds
+// correctly instead of reading an index that no longer matches it.
 export function eraseStrokesAt(strokes: Stroke[], x: number, y: number, radius: number): Stroke[] {
   const bounds: Bounds = { x: x - radius, y: y - radius, width: radius * 2, height: radius * 2 };
-  const candidates = queryStrokeIndices(strokes, bounds, 0);
+  const candidates = queryStrokes(strokes, bounds, 0);
   if (!candidates.length) return strokes;
-  const hits = new Set<number>();
-  for (const index of candidates) {
-    if (pointHitsStroke(x, y, strokes[index], radius)) hits.add(index);
+  const hits: Stroke[] = [];
+  for (const stroke of candidates) {
+    if (pointHitsStroke(x, y, stroke, radius)) hits.push(stroke);
   }
-  if (!hits.size) return strokes;
-  return strokes.filter((_, index) => !hits.has(index));
+  if (!hits.length) return strokes;
+  const hitSet = new Set(hits);
+  const remaining = strokes.filter((stroke) => !hitSet.has(stroke));
+  const index = strokeIndexCache.get(strokes);
+  if (index) {
+    strokeIndexCache.delete(strokes);
+    for (const stroke of hits) removeStrokeFromIndex(index, stroke);
+    strokeIndexCache.set(remaining, index);
+  }
+  return remaining;
 }
 
 // Same result as strokes.filter((stroke) => intersectsBounds(stroke, bounds)),
 // narrowed first by the spatial index instead of scanning every stroke.
 export function strokesIntersectingBounds(strokes: Stroke[], bounds: Bounds): Stroke[] {
-  const candidates = queryStrokeIndices(strokes, bounds, 0);
-  const result: Stroke[] = [];
-  for (const index of candidates) {
-    const stroke = strokes[index];
-    if (intersectsBounds(stroke, bounds)) result.push(stroke);
-  }
-  return result;
+  return queryStrokes(strokes, bounds, 0).filter((stroke) => intersectsBounds(stroke, bounds));
 }
 
 function pointToSegment(start: Point, end: Point, x: number, y: number) {
@@ -604,9 +686,8 @@ export function drawBoard(
     }
   }
 
-  const strokeIndices = visibleBounds ? queryStrokeIndices(strokes, visibleBounds, 0) : strokes.keys();
-  for (const strokeIndex of strokeIndices) {
-    const stroke = strokes[strokeIndex];
+  const strokeItems: Iterable<Stroke> = visibleBounds ? queryStrokes(strokes, visibleBounds, 0) : strokes;
+  for (const stroke of strokeItems) {
     if (!stroke.points.length) continue;
     const bounds = visibleBounds ? cachedStrokeBounds(stroke) : null;
     if (visibleBounds && (!bounds || !overlapsBounds(bounds, visibleBounds, stroke.width / 2))) continue;

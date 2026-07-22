@@ -12,7 +12,7 @@ try {
   await page.goto("http://127.0.0.1:1420", { waitUntil: "networkidle" });
 
   const results = await page.evaluate(async () => {
-    const { eraseStrokesAt, eraseStrokesAtLinear, queryStrokeIndices, strokeBounds } = await import("/src/board.ts");
+    const { eraseStrokesAt, eraseStrokesAtLinear, addStroke, queryStrokes, strokeBounds } = await import("/src/board.ts");
 
     let seed = 7;
     const random = () => {
@@ -49,8 +49,7 @@ try {
       return bounds && overlaps(bounds, visibleBounds, stroke.width / 2);
     });
 
-    const spatialCull = (strokes, visibleBounds) => queryStrokeIndices(strokes, visibleBounds, 0)
-      .map((index) => strokes[index])
+    const spatialCull = (strokes, visibleBounds) => queryStrokes(strokes, visibleBounds, 0)
       .filter((stroke) => {
         const bounds = strokeBounds([stroke]);
         return bounds && overlaps(bounds, visibleBounds, stroke.width / 2);
@@ -109,10 +108,33 @@ try {
       for (let i = 0; i < COLD_TRIALS; i += 1) spatialCull(strokes.slice(), viewport());
       const coldCullMs = (performance.now() - coldCullStart) / COLD_TRIALS * WARM_REPEATS;
 
+      // App hot path: append one stroke (as commitBoard does on pointer-up),
+      // then immediately cull against it (as the next redraw does). "spread"
+      // replays the array's old `[...strokes, stroke]` identity-breaking
+      // pattern, forcing a full index rebuild on the cull that follows.
+      // "addStroke" carries the existing index forward instead.
+      const ADD_TRIALS = 50;
+      let spreadAddStart = performance.now();
+      let spreadStrokes = strokes;
+      for (let i = 0; i < ADD_TRIALS; i += 1) {
+        spreadStrokes = [...spreadStrokes, makeStrokes(1)[0]];
+        spatialCull(spreadStrokes, viewport());
+      }
+      const spreadAddMs = (performance.now() - spreadAddStart) / ADD_TRIALS * WARM_REPEATS;
+
+      let incrementalAddStart = performance.now();
+      let incrementalStrokes = strokes;
+      for (let i = 0; i < ADD_TRIALS; i += 1) {
+        incrementalStrokes = addStroke(incrementalStrokes, makeStrokes(1)[0]);
+        spatialCull(incrementalStrokes, viewport());
+      }
+      const incrementalAddMs = (performance.now() - incrementalAddStart) / ADD_TRIALS * WARM_REPEATS;
+
       report.push({
         size,
         linearHitMs, spatialHitMs, coldHitMs,
         linearCullMs, spatialCullMs, coldCullMs,
+        spreadAddMs, incrementalAddMs,
         repeats: WARM_REPEATS,
       });
     }
@@ -134,6 +156,14 @@ try {
       + `${(linearHitPerOp / spatialHitPerOp).toFixed(1)}x\t${linearCullPerOp.toFixed(2)}\t${spatialCullPerOp.toFixed(2)}\t${coldCullPerOp.toFixed(2)}\t`
       + `${(linearCullPerOp / spatialCullPerOp).toFixed(1)}x`,
     );
+  }
+
+  console.log("\nApp hot path: append one stroke, then cull (us/op) - spread forces a rebuild, addStroke patches the existing index:");
+  console.log("size\tspread-add+cull(us/op)\taddStroke-add+cull(us/op)\tspeedup");
+  for (const row of results) {
+    const spreadPerOp = (row.spreadAddMs / row.repeats) * 1000;
+    const incrementalPerOp = (row.incrementalAddMs / row.repeats) * 1000;
+    console.log(`${row.size}\t${spreadPerOp.toFixed(2)}\t${incrementalPerOp.toFixed(2)}\t${(spreadPerOp / incrementalPerOp).toFixed(1)}x`);
   }
 } finally {
   await browser.close();

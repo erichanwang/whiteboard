@@ -13,7 +13,7 @@ try {
   await page.goto("http://127.0.0.1:1420", { waitUntil: "networkidle" });
 
   const result = await page.evaluate(async () => {
-    const { eraseStrokesAt, eraseStrokesAtLinear, strokesIntersectingBounds, intersectsBounds, strokeBounds, queryStrokeIndices } =
+    const { eraseStrokesAt, eraseStrokesAtLinear, strokesIntersectingBounds, intersectsBounds, strokeBounds, queryStrokes, addStroke } =
       await import("/src/board.ts");
 
     // Deterministic PRNG so failures are reproducible.
@@ -81,9 +81,7 @@ try {
       // Viewport cull equivalence: same broad-phase index drawBoard uses,
       // followed by the same narrow-phase check drawBoard applies per stroke.
       const visibleBounds = { x: bx, y: by, width: 200 + random() * 4000, height: 200 + random() * 4000 };
-      const candidateIndices = queryStrokeIndices(strokes, visibleBounds, 0);
-      const spatialCull = candidateIndices
-        .map((index) => strokes[index])
+      const spatialCull = queryStrokes(strokes, visibleBounds, 0)
         .filter((stroke) => {
           const bounds2 = strokeBounds([stroke]);
           return bounds2 && overlaps(bounds2, visibleBounds, stroke.width / 2);
@@ -108,14 +106,74 @@ try {
     const farQuery = eraseStrokesAt(single, SPREAD * 10, SPREAD * 10, 5);
     if (farQuery !== single) throw new Error("Far-away query did not return the original array reference.");
 
-    return { hitTestTrials, cullTrials, selectionTrials };
+    // Incremental-maintenance equivalence: a long sequence of adds, erases,
+    // and undos (addStroke/eraseStrokesAt patch the cached index in place
+    // instead of discarding it - this is the part that must never go stale).
+    // After every single mutation, every array still reachable through the
+    // "undo stack" is checked against a fresh linear scan, not just the
+    // current one, since undo revisits an array whose cached index may have
+    // been built, then later patched-and-reassigned to a different array by
+    // addStroke/eraseStrokesAt.
+    let mutationTrials = 0;
+    let current = makeStrokes(40);
+    const undoStack = [];
+    for (let step = 0; step < 400; step += 1) {
+      const action = random();
+      if (action < 0.45) {
+        undoStack.push(current);
+        current = addStroke(current, makeStrokes(1)[0]);
+      } else if (action < 0.9) {
+        const x = random() * SPREAD;
+        const y = random() * SPREAD;
+        const radius = 2 + random() * 40;
+        const next = eraseStrokesAt(current, x, y, radius);
+        if (next !== current) {
+          undoStack.push(current);
+          current = next;
+        }
+      } else if (undoStack.length) {
+        current = undoStack.pop();
+      }
+
+      const bx = random() * SPREAD;
+      const by = random() * SPREAD;
+      const visibleBounds = { x: bx, y: by, width: 200 + random() * 4000, height: 200 + random() * 4000 };
+      const spatial = queryStrokes(current, visibleBounds, 0)
+        .filter((stroke) => {
+          const bounds = strokeBounds([stroke]);
+          return bounds && overlaps(bounds, visibleBounds, stroke.width / 2);
+        })
+        .map((s) => s.id);
+      const linear = current
+        .filter((stroke) => {
+          const bounds = strokeBounds([stroke]);
+          return bounds && overlaps(bounds, visibleBounds, stroke.width / 2);
+        })
+        .map((s) => s.id);
+      if (JSON.stringify(spatial) !== JSON.stringify(linear)) {
+        throw new Error(`Incremental-maintenance mismatch on step ${step}: spatial=${JSON.stringify(spatial)} linear=${JSON.stringify(linear)}`);
+      }
+
+      const hx = random() * SPREAD;
+      const hy = random() * SPREAD;
+      const hitRadius = 2 + random() * 40;
+      const hitSpatial = eraseStrokesAt(current, hx, hy, hitRadius).map((s) => s.id);
+      const hitLinear = eraseStrokesAtLinear(current, hx, hy, hitRadius).map((s) => s.id);
+      if (JSON.stringify(hitSpatial) !== JSON.stringify(hitLinear)) {
+        throw new Error(`Incremental hit-test mismatch on step ${step}: spatial=${JSON.stringify(hitSpatial)} linear=${JSON.stringify(hitLinear)}`);
+      }
+      mutationTrials += 1;
+    }
+
+    return { hitTestTrials, cullTrials, selectionTrials, mutationTrials };
   });
 
-  if (result.hitTestTrials !== 300 || result.cullTrials !== 300 || result.selectionTrials !== 300) {
+  if (result.hitTestTrials !== 300 || result.cullTrials !== 300 || result.selectionTrials !== 300 || result.mutationTrials !== 400) {
     throw new Error(`Not all trials ran: ${JSON.stringify(result)}`);
   }
 
   console.log(`Spatial index equivalence test passed: ${result.hitTestTrials} hit-test, ${result.cullTrials} cull, and ${result.selectionTrials} selection trials matched the linear scan exactly.`);
+  console.log(`Incremental maintenance equivalence test passed: ${result.mutationTrials} add/erase/undo steps matched the linear scan exactly.`);
 } finally {
   await browser.close();
 }

@@ -34,6 +34,7 @@ import "./App.css";
 import {
   BOARD_STORAGE_KEY,
   SETTINGS_STORAGE_KEY,
+  addStroke,
   appendStrokePoint,
   canvasPixelRatio,
   createBoard,
@@ -1255,7 +1256,7 @@ function App() {
     const stroke = currentStroke.current;
     if (!stroke || stroke.pointerType !== "mousepad-capture") return;
     currentStroke.current = null;
-    if (stroke.points.length > 1) commitBoard({ ...boardRef.current, strokes: [...boardRef.current.strokes, stroke] });
+    if (stroke.points.length > 1) commitBoard({ ...boardRef.current, strokes: addStroke(boardRef.current.strokes, stroke) });
     else redraw();
   }, [commitBoard, redraw]);
 
@@ -1449,7 +1450,7 @@ function App() {
       const stroke = currentStroke.current;
       appendStrokePoint(stroke, end);
       currentStroke.current = null;
-      commitBoard({ ...boardRef.current, strokes: [...boardRef.current.strokes, stroke] });
+      commitBoard({ ...boardRef.current, strokes: addStroke(boardRef.current.strokes, stroke) });
     } else if (eraseOrigin.current) {
       const original = eraseOrigin.current;
       eraseOrigin.current = null;
