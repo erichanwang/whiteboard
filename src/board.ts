@@ -177,6 +177,86 @@ export function parseBoard(value: string): BoardDocument {
   };
 }
 
+// Uniform-grid spatial index over a strokes array, used to narrow hit-testing
+// and viewport culling from an O(n) scan down to the strokes near a query
+// region. It is a broad-phase filter only: every consumer still runs the same
+// exact narrow-phase check (pointHitsStroke / overlapsBounds / intersectsBounds)
+// that the plain linear scan uses, so results are identical by construction.
+const SPATIAL_CELL_SIZE = 512;
+
+type StrokeIndex = {
+  cellSize: number;
+  cells: Map<string, number[]>;
+  maxHalfWidth: number;
+};
+
+const strokeIndexCache = new WeakMap<Stroke[], StrokeIndex>();
+
+function cellKey(cx: number, cy: number) {
+  return `${cx},${cy}`;
+}
+
+function cellRange(bounds: Bounds, cellSize: number, pad: number) {
+  return {
+    minCx: Math.floor((bounds.x - pad) / cellSize),
+    maxCx: Math.floor((bounds.x + bounds.width + pad) / cellSize),
+    minCy: Math.floor((bounds.y - pad) / cellSize),
+    maxCy: Math.floor((bounds.y + bounds.height + pad) / cellSize),
+  };
+}
+
+function buildStrokeIndex(strokes: Stroke[]): StrokeIndex {
+  const cells = new Map<string, number[]>();
+  let maxHalfWidth = 0;
+  for (let index = 0; index < strokes.length; index += 1) {
+    const stroke = strokes[index];
+    if (!stroke.points.length) continue;
+    maxHalfWidth = Math.max(maxHalfWidth, stroke.width / 2);
+    const bounds = cachedStrokeBounds(stroke);
+    if (!bounds) continue;
+    const { minCx, maxCx, minCy, maxCy } = cellRange(bounds, SPATIAL_CELL_SIZE, 0);
+    for (let cx = minCx; cx <= maxCx; cx += 1) {
+      for (let cy = minCy; cy <= maxCy; cy += 1) {
+        const key = cellKey(cx, cy);
+        let bucket = cells.get(key);
+        if (!bucket) {
+          bucket = [];
+          cells.set(key, bucket);
+        }
+        bucket.push(index);
+      }
+    }
+  }
+  return { cellSize: SPATIAL_CELL_SIZE, cells, maxHalfWidth };
+}
+
+function strokeIndexFor(strokes: Stroke[]): StrokeIndex {
+  let index = strokeIndexCache.get(strokes);
+  if (!index) {
+    index = buildStrokeIndex(strokes);
+    strokeIndexCache.set(strokes, index);
+  }
+  return index;
+}
+
+// Returns the indices (ascending, matching document order) of strokes whose
+// unpadded bounds could fall within `pad` of `bounds`, widened further by the
+// widest stroke's half-width so no stroke that a narrow-phase check could
+// still accept is ever excluded.
+export function queryStrokeIndices(strokes: Stroke[], bounds: Bounds, pad: number): number[] {
+  const index = strokeIndexFor(strokes);
+  const { minCx, maxCx, minCy, maxCy } = cellRange(bounds, index.cellSize, pad + index.maxHalfWidth);
+  const seen = new Set<number>();
+  for (let cx = minCx; cx <= maxCx; cx += 1) {
+    for (let cy = minCy; cy <= maxCy; cy += 1) {
+      const bucket = index.cells.get(cellKey(cx, cy));
+      if (!bucket) continue;
+      for (const strokeIndex of bucket) seen.add(strokeIndex);
+    }
+  }
+  return [...seen].sort((a, b) => a - b);
+}
+
 const imageCache = new Map<string, HTMLImageElement>();
 const strokeBoundsCache = new WeakMap<Stroke, Bounds>();
 type StrokeRenderGeometry =
@@ -333,7 +413,9 @@ export function pointHitsStroke(x: number, y: number, stroke: Stroke, radius: nu
   return false;
 }
 
-export function eraseStrokesAt(strokes: Stroke[], x: number, y: number, radius: number): Stroke[] {
+// Plain O(n) scan, kept for the equivalence benchmark/tests and as a reference
+// implementation of the exact semantics eraseStrokesAt must preserve.
+export function eraseStrokesAtLinear(strokes: Stroke[], x: number, y: number, radius: number): Stroke[] {
   let remaining: Stroke[] | null = null;
   for (let index = 0; index < strokes.length; index += 1) {
     const stroke = strokes[index];
@@ -344,6 +426,30 @@ export function eraseStrokesAt(strokes: Stroke[], x: number, y: number, radius: 
     }
   }
   return remaining ?? strokes;
+}
+
+export function eraseStrokesAt(strokes: Stroke[], x: number, y: number, radius: number): Stroke[] {
+  const bounds: Bounds = { x: x - radius, y: y - radius, width: radius * 2, height: radius * 2 };
+  const candidates = queryStrokeIndices(strokes, bounds, 0);
+  if (!candidates.length) return strokes;
+  const hits = new Set<number>();
+  for (const index of candidates) {
+    if (pointHitsStroke(x, y, strokes[index], radius)) hits.add(index);
+  }
+  if (!hits.size) return strokes;
+  return strokes.filter((_, index) => !hits.has(index));
+}
+
+// Same result as strokes.filter((stroke) => intersectsBounds(stroke, bounds)),
+// narrowed first by the spatial index instead of scanning every stroke.
+export function strokesIntersectingBounds(strokes: Stroke[], bounds: Bounds): Stroke[] {
+  const candidates = queryStrokeIndices(strokes, bounds, 0);
+  const result: Stroke[] = [];
+  for (const index of candidates) {
+    const stroke = strokes[index];
+    if (intersectsBounds(stroke, bounds)) result.push(stroke);
+  }
+  return result;
 }
 
 function pointToSegment(start: Point, end: Point, x: number, y: number) {
@@ -498,7 +604,9 @@ export function drawBoard(
     }
   }
 
-  for (const stroke of strokes) {
+  const strokeIndices = visibleBounds ? queryStrokeIndices(strokes, visibleBounds, 0) : strokes.keys();
+  for (const strokeIndex of strokeIndices) {
+    const stroke = strokes[strokeIndex];
     if (!stroke.points.length) continue;
     const bounds = visibleBounds ? cachedStrokeBounds(stroke) : null;
     if (visibleBounds && (!bounds || !overlapsBounds(bounds, visibleBounds, stroke.width / 2))) continue;

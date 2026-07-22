@@ -42,11 +42,11 @@ import {
   drawGrid,
   eraseStrokesAt,
   inkColor,
-  intersectsBounds,
   parseBoard,
   pruneImageCache,
   renderSelectionImage,
   strokeBounds,
+  strokesIntersectingBounds,
   textObjectBounds,
 } from "./board";
 import { listNvidiaModels, recognizeInk } from "./recognition";
@@ -408,7 +408,7 @@ export async function prepareEmbeddedImage(
 
 function selectedBoardIds(board: BoardDocument, bounds: Bounds) {
   return new Set([
-    ...board.strokes.filter((stroke) => intersectsBounds(stroke, bounds)).map((stroke) => stroke.id),
+    ...strokesIntersectingBounds(board.strokes, bounds).map((stroke) => stroke.id),
     ...board.imageObjects.filter((item) => (
       item.x <= bounds.x + bounds.width && item.x + item.width >= bounds.x
       && item.y <= bounds.y + bounds.height && item.y + item.height >= bounds.y
@@ -2076,7 +2076,7 @@ function App() {
       width: Math.ceil((left + rect.width / view.scale) / grid) * grid - Math.floor(left / grid) * grid,
       height: Math.ceil((top + rect.height / view.scale) / grid) * grid - Math.floor(top / grid) * grid,
     };
-    return renderSelectionImage(board.strokes.filter((stroke) => intersectsBounds(stroke, bounds)), board.theme, bounds);
+    return renderSelectionImage(strokesIntersectingBounds(board.strokes, bounds), board.theme, bounds);
   }
 
   async function runRecognition(mode: RecognitionMode, scope: RecognitionScope = recognitionScope) {
