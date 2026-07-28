@@ -20,6 +20,8 @@ use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 use zeroize::Zeroizing;
 
+pub mod wal;
+
 const NVIDIA_API_URL: &str = "https://integrate.api.nvidia.com/v1";
 
 #[derive(Debug, Deserialize)]
@@ -1173,6 +1175,31 @@ mod tests {
             board
         );
         assert!(decrypt_board(encrypted, "wrong password".to_string()).is_err());
+    }
+
+    // src/board.ts serializeBoard now emits a binary-packed stroke point
+    // format (wire `"fmt":2`, per-stroke `"pts"` base64 blob instead of a
+    // JSON `"points"` array) to push compression past 10x. This file's
+    // encrypt_board/decrypt_board never inspect stroke internals - they only
+    // require the whole payload to be valid JSON/UTF-8 text - so the new wire
+    // format needs no Rust changes, but that assumption is exactly what this
+    // test pins down against regressions.
+    #[test]
+    fn encrypted_board_round_trip_survives_the_binary_stroke_wire_format() {
+        let board = r##"{"version":1,"fmt":2,"id":"test-board","title":"Binary format board","theme":"white","grid":true,"strokes":[{"id":"11111111-1111-4111-8111-111111111111","color":"#111111","width":2.5,"pointerType":"pen","pts":"AsEB1AH6AQ=="}],"textObjects":[],"imageObjects":[],"updatedAt":"2026-07-27T00:00:00.000Z"}"##;
+        let encrypted = encrypt_board(board.to_string(), "correct horse battery staple".to_string())
+            .unwrap();
+        assert_ne!(encrypted.as_slice(), board.as_bytes());
+        assert_eq!(
+            decrypt_board(encrypted.clone(), "correct horse battery staple".to_string()).unwrap(),
+            board
+        );
+        assert!(decrypt_board(encrypted, "wrong password".to_string()).is_err());
+
+        let metadata = serde_json::from_str::<LibraryBoardMetadata>(board)
+            .expect("library metadata should still parse from the binary-format payload");
+        assert_eq!(metadata.id, "test-board");
+        assert_eq!(metadata.title, "Binary format board");
     }
 
     #[test]

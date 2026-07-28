@@ -85,29 +85,187 @@ export const createBoard = (): BoardDocument => ({
   updatedAt: new Date().toISOString(),
 });
 
+// Rounds every number to 2 decimal places before serializing. Stroke points
+// carry far more float64 precision than the app ever writes back out - the
+// compaction tolerances in appendStrokePoint/compactStrokePoints already
+// operate at 0.012-0.6 units, so shaving fractional-hundredths noise off the
+// JSON text loses nothing visible while shrinking saved/exported board size.
+// parseBoard reads plain numbers regardless of precision, so this is fully
+// backward compatible with existing saved boards.
+function roundSerializedNumber(_key: string, value: unknown) {
+  return typeof value === "number" ? Math.round(value * 100) / 100 : value;
+}
+
+// --- Binary stroke-point codec (wire format `fmt: 2`) -----------------------
+//
+// A stroke's points array is by far the largest part of a saved board.
+// {"x":123.45,"y":67.89,"pressure":0.42} costs ~39 JSON bytes per point.
+// Points are also highly redundant to encode independently: consecutive
+// points from a pen stroke are close together, and every value is already
+// quantized to 0.01 units (see roundSerializedNumber) or less. So each
+// stroke's points are packed into a byte buffer instead:
+//   varint pointCount
+//   per point: zigzag-varint delta-x (x100), zigzag-varint delta-y (y100),
+//              1 byte quantized pressure (0-255)
+// The first point's "delta" is against an implicit (0, 0) origin, i.e. its
+// absolute position. x/y are scaled by 100 before differencing so the
+// encoded value is exactly the same 0.01-unit quantization the JSON path
+// already applies via roundSerializedNumber - no extra fidelity loss.
+// The buffer is then base64-encoded into a `pts` string on the stroke, so
+// the overall board is still one self-describing JSON document (the Rust
+// read/write path only ever looks at top-level id/title/updatedAt and
+// whether the whole thing is valid JSON/UTF-8 text, so it needs no changes).
+const COORDINATE_SCALE = 100;
+
+function zigzagEncode(n: number): number {
+  return n >= 0 ? n * 2 : -n * 2 - 1;
+}
+
+function zigzagDecode(z: number): number {
+  return z % 2 === 0 ? z / 2 : -(z + 1) / 2;
+}
+
+function writeVarint(bytes: number[], value: number) {
+  while (value >= 0x80) {
+    bytes.push((value & 0x7f) | 0x80);
+    value = Math.floor(value / 128);
+  }
+  bytes.push(value);
+}
+
+// Returns null (rather than throwing/reading garbage) on truncated input.
+function readVarint(bytes: Uint8Array, pos: { i: number }): number | null {
+  let result = 0;
+  let shift = 1;
+  for (;;) {
+    if (pos.i >= bytes.length) return null;
+    const byte = bytes[pos.i];
+    pos.i += 1;
+    result += (byte & 0x7f) * shift;
+    if ((byte & 0x80) === 0) return result;
+    shift *= 128;
+  }
+}
+
+function encodePointsBinary(points: readonly Point[]): Uint8Array {
+  const bytes: number[] = [];
+  writeVarint(bytes, points.length);
+  let previousX = 0;
+  let previousY = 0;
+  for (const point of points) {
+    const x = Math.round(point.x * COORDINATE_SCALE);
+    const y = Math.round(point.y * COORDINATE_SCALE);
+    writeVarint(bytes, zigzagEncode(x - previousX));
+    writeVarint(bytes, zigzagEncode(y - previousY));
+    bytes.push(Math.round(clamp(point.pressure, 0, 1) * 255));
+    previousX = x;
+    previousY = y;
+  }
+  return Uint8Array.from(bytes);
+}
+
+// Mirrors parseBoard's clamping of x/y/pressure. maxPoints bounds output size
+// against a truncated/adversarial buffer even if its declared count lies.
+function decodePointsBinary(bytes: Uint8Array, maxPoints: number): Point[] {
+  const pos = { i: 0 };
+  const count = readVarint(bytes, pos);
+  if (count === null || count < 0) return [];
+  const points: Point[] = [];
+  let x = 0;
+  let y = 0;
+  for (let index = 0; index < count && index < maxPoints; index += 1) {
+    const dx = readVarint(bytes, pos);
+    const dy = readVarint(bytes, pos);
+    if (dx === null || dy === null) break;
+    const pressureByte = bytes[pos.i];
+    if (pressureByte === undefined) break;
+    pos.i += 1;
+    x += zigzagDecode(dx);
+    y += zigzagDecode(dy);
+    points.push({
+      x: clamp(x / COORDINATE_SCALE, -MAX_COORDINATE, MAX_COORDINATE),
+      y: clamp(y / COORDINATE_SCALE, -MAX_COORDINATE, MAX_COORDINATE),
+      pressure: clamp(pressureByte / 255, 0, 1),
+    });
+  }
+  return points;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+const CURRENT_WIRE_FORMAT = 2;
+
+export function serializeBoard(board: BoardDocument): string {
+  const wireBoard = {
+    ...board,
+    fmt: CURRENT_WIRE_FORMAT,
+    strokes: board.strokes.map((stroke) => ({
+      id: stroke.id,
+      color: stroke.color,
+      width: stroke.width,
+      pointerType: stroke.pointerType,
+      pts: bytesToBase64(encodePointsBinary(stroke.points)),
+    })),
+  };
+  return JSON.stringify(wireBoard, roundSerializedNumber);
+}
+
 export function parseBoard(value: string): BoardDocument {
   const parsed: unknown = JSON.parse(value);
   if (!isRecord(parsed) || parsed.version !== 1 || !Array.isArray(parsed.strokes) || !Array.isArray(parsed.textObjects)) {
     throw new Error("This is not a supported Whiteboard file.");
   }
+  const binaryFormat = parsed.fmt === CURRENT_WIRE_FORMAT;
 
   const strokes: Stroke[] = [];
   let totalPoints = 0;
   for (const item of parsed.strokes.slice(0, MAX_STROKES)) {
     if (!isRecord(item) || !validIdentifier(item.id) || !validShortString(item.color)
-      || !finiteNumber(item.width) || !validShortString(item.pointerType) || !Array.isArray(item.points)) continue;
+      || !finiteNumber(item.width) || !validShortString(item.pointerType)) continue;
 
     const remainingPoints = MAX_TOTAL_POINTS - totalPoints;
     if (remainingPoints <= 0) break;
-    const points: Point[] = [];
-    for (const point of item.points.slice(0, Math.min(MAX_POINTS_PER_STROKE, remainingPoints))) {
-      if (!isRecord(point) || !finiteNumber(point.x) || !finiteNumber(point.y)
-        || !finiteNumber(point.pressure)) continue;
-      points.push({
-        x: clamp(point.x, -MAX_COORDINATE, MAX_COORDINATE),
-        y: clamp(point.y, -MAX_COORDINATE, MAX_COORDINATE),
-        pressure: clamp(point.pressure, 0, 1),
-      });
+    const maxPointsForStroke = Math.min(MAX_POINTS_PER_STROKE, remainingPoints);
+    let points: Point[];
+    if (binaryFormat) {
+      // Bound decode work against a malicious/corrupt file: 11 bytes/point is
+      // the varint worst case (5-byte zigzag dx + 5-byte zigzag dy + 1 byte
+      // pressure), base64-expanded by 4/3, plus a little slack for the
+      // leading point-count varint.
+      if (typeof item.pts !== "string" || item.pts.length > (MAX_POINTS_PER_STROKE * 11 * 4 / 3 + 32)) continue;
+      let decoded: Uint8Array;
+      try {
+        decoded = base64ToBytes(item.pts);
+      } catch {
+        continue;
+      }
+      points = decodePointsBinary(decoded, maxPointsForStroke);
+    } else {
+      if (!Array.isArray(item.points)) continue;
+      points = [];
+      for (const point of item.points.slice(0, maxPointsForStroke)) {
+        if (!isRecord(point) || !finiteNumber(point.x) || !finiteNumber(point.y)
+          || !finiteNumber(point.pressure)) continue;
+        points.push({
+          x: clamp(point.x, -MAX_COORDINATE, MAX_COORDINATE),
+          y: clamp(point.y, -MAX_COORDINATE, MAX_COORDINATE),
+          pressure: clamp(point.pressure, 0, 1),
+        });
+      }
     }
     if (!points.length) continue;
     totalPoints += points.length;

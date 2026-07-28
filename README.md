@@ -118,7 +118,7 @@ Run the throughput benchmark (headless Chromium, 1K/10K/50K/100K strokes, linear
 node tests/spatial-index-bench.mjs
 ```
 
-Measured on this machine (microseconds per operation; "warm" reuses one strokes array across repeated queries, as happens across repeated erase samples or redraws while panning; "cold" rebuilds the index every call, i.e. right after an edit):
+Measured on this machine (13th Gen Intel Core i7-1360P, 16 logical CPUs, 30 GiB RAM, Ubuntu, Node v24.16.0, Chromium 150 headless; microseconds per operation; "warm" reuses one strokes array across repeated queries, as happens across repeated erase samples or redraws while panning; "cold" rebuilds the index every call, i.e. right after an edit):
 
 | Strokes | Linear hit-test | Spatial hit-test (warm) | Spatial hit-test (cold) | Warm speedup | Linear cull | Spatial cull (warm) | Spatial cull (cold) | Warm speedup |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -128,6 +128,26 @@ Measured on this machine (microseconds per operation; "warm" reuses one strokes 
 | 100,000 | 6,503-7,934 us | 669-974 us | 31,160-35,025 us | ~7-12x | 11,731-14,251 us | 65-87 us | 26,685-35,385 us | ~164-181x |
 
 Both linear scan and the spatial index grow with stroke count, but the index's warm cost grows much more slowly because a query only touches strokes near the query point/viewport instead of every stroke on the board. The cold cost (index rebuilt every call) is higher than a single linear scan at these sizes, so the win comes from reusing the cached index across the many repeated queries a real editing session issues before the strokes array changes (panning redraws, successive erase samples along a drag).
+
+### Stroke simplification and compression
+
+Strokes are simplified as they are drawn: `appendStrokePoint` in `src/board.ts` collapses near-collinear, near-constant-pressure samples online (retaining corners, reversals, pressure changes, and the stroke's start/latest point), and `compactStrokePoints` re-runs the same tolerance check over a whole stroke if it is still growing past 20,000 points. Saved/exported boards additionally go through `serializeBoard`, which rounds every number to 2 decimal places before `JSON.stringify` - stroke coordinates and pressure are already tracked at a coarser tolerance (0.012-0.6 units) than that rounding removes, so this loses no visible precision while shrinking the JSON text.
+
+Run the benchmark (headless Chromium, synthetic handwriting: 400 strokes sampled at ~240 Hz along smooth cursive-like curves with sensor jitter and ramping pressure, fed one sample at a time through `appendStrokePoint` exactly as the live pointermove handler does):
+
+```bash
+node tests/compression-bench.mjs
+```
+
+Measured on this machine (13th Gen Intel Core i7-1360P, 16 logical CPUs, 30 GiB RAM, Ubuntu, Node v24.16.0, Chromium 150 headless):
+
+| Stage | Points | JSON bytes | Reduction vs. raw samples |
+| --- | --- | --- | --- |
+| Raw pointer samples | 46,334 | 3,599,287 | - |
+| After live simplification (full float precision) | 13,356 | 1,059,151 | 3.40x |
+| After live simplification + `serializeBoard` rounding (actual saved format) | 13,356 | 528,396 | 6.81x |
+
+Fidelity loss from simplification, measured as the perpendicular distance from every raw sample point to the nearest segment of the simplified polyline: **max 0.97 px, mean 0.086 px** across the 400 strokes. Both are far below one screen pixel at any normal zoom level, consistent with "no visible fidelity loss," but the measured compression ratio is **6.81x, not the 10x+ this has been described as elsewhere** - that overstated claim should be corrected. The simplification tolerance itself was left untouched to hit a number; the only change made here was the lossless `serializeBoard` rounding step, which is why the ratio moved from 3.40x to 6.81x rather than further.
 
 The first release is focused on a dependable local canvas. It does not include cloud sync, collaboration, or a background service that reads raw Linux input devices.
 

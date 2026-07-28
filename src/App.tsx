@@ -48,6 +48,7 @@ import {
   parseBoard,
   pruneImageCache,
   renderSelectionImage,
+  serializeBoard,
   strokeBounds,
   strokesIntersectingBounds,
   textObjectBounds,
@@ -705,11 +706,22 @@ function App() {
   const lastNativeSavedBoardRef = useRef<BoardDocument | null>(null);
   const mousepadCursorRef = useRef<{ x: number; y: number } | null>(null);
   const pasteSinkRef = useRef<HTMLTextAreaElement>(null);
+  const widthInputRef = useRef<HTMLInputElement>(null);
+  const pasteFromClipboardRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const toolRef = useRef(tool);
+  const widthRef = useRef(width);
   const practiceKeysRef = useRef<(event: KeyboardEvent) => boolean>(() => false);
   const practicePointerId = useRef<number | null>(null);
   const currentPracticeStroke = useRef<Stroke | null>(null);
   const practiceStrokesRef = useRef(practiceStrokes);
   const pressedKeys = useRef(new Set<string>());
+
+  useEffect(() => { toolRef.current = tool; }, [tool]);
+
+  function selectTool(next: Tool) {
+    toolRef.current = next;
+    setTool(next);
+  }
   const canvasHover = useRef<{ clientX: number; clientY: number; point: Point } | null>(null);
   const keyboardPointerAction = useRef<"left" | "middle" | "right" | null>(null);
   const selectionTransformRef = useRef<SelectionTransform | null>(null);
@@ -1033,7 +1045,7 @@ function App() {
     setSaveState("saving");
     let cancelled = false;
     const cacheRecovery = (target: BoardDocument) => {
-      const serialized = JSON.stringify(target);
+      const serialized = serializeBoard(target);
       const recovery = { board: target, serialized, browserSaved: false };
       recoveryCacheRef.current = recovery;
       return recovery;
@@ -1093,7 +1105,7 @@ function App() {
       const current = boardRef.current;
       if (lastNativeSavedBoardRef.current === current) return;
       try {
-        localStorage.setItem(BOARD_STORAGE_KEY, JSON.stringify(current));
+        localStorage.setItem(BOARD_STORAGE_KEY, serializeBoard(current));
       } catch {
         // The normal save state already reports storage failures while the app is open.
       }
@@ -1348,7 +1360,11 @@ function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       pressedKeys.current.add(event.key);
       const target = event.target as HTMLElement;
-      if (target !== pasteSinkRef.current && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
+      if (target !== pasteSinkRef.current && target !== widthInputRef.current && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)) return;
+      if (target === widthInputRef.current && Number.isFinite(widthInputRef.current.valueAsNumber)) {
+        widthRef.current = Math.min(18, Math.max(1, widthInputRef.current.valueAsNumber));
+        setWidth(widthRef.current);
+      }
       // Ctrl/Cmd combinations such as Ctrl+V must not trigger the single-letter tool shortcuts.
       const toolShortcut = !event.ctrlKey && !event.metaKey;
       if (practiceKeysRef.current(event)) {
@@ -1364,13 +1380,22 @@ function App() {
       } else if (!event.repeat && event.key.toLowerCase() === "m") {
         event.preventDefault();
         toggleMousepadCapture();
+      } else if (toolShortcut && event.key === "Shift") selectTool("eraser");
+      else if (toolShortcut && event.key.toLowerCase() === "a") selectTool("select");
+      else if (toolShortcut && event.key.toLowerCase() === "s") selectTool("hand");
+      else if (toolShortcut && event.key.toLowerCase() === "d") selectTool("text");
+      else if (toolShortcut && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        void pasteFromClipboardRef.current().catch((error) => window.alert(`Could not paste: ${String(error)}`));
       } else if (!event.repeat && canvasHover.current && !keyboardPointerAction.current && !currentStroke.current && !dragOrigin.current && !selectionOrigin.current
         && [...inputBindings.leftKeys, ...inputBindings.middleKeys, ...inputBindings.rightKeys].includes(event.key)) {
         event.preventDefault();
         const hover = canvasHover.current;
         if (inputBindings.leftKeys.includes(event.key)) {
           keyboardPointerAction.current = "left";
+          toolRef.current = "pen";
           beginPrimaryAction(hover.point, hover.clientX, hover.clientY, "keyboard");
+          setTool("pen");
         } else if (inputBindings.middleKeys.includes(event.key)) {
           keyboardPointerAction.current = "middle";
           dragOrigin.current = {
@@ -1384,13 +1409,12 @@ function App() {
           setSelectionBox({ x: hover.point.x, y: hover.point.y, width: 0, height: 0 });
         }
         redraw();
-      } else if (toolShortcut && event.key.toLowerCase() === "p") setTool("pen");
-      else if (toolShortcut && event.key.toLowerCase() === "e") setTool("eraser");
-      else if (toolShortcut && event.key.toLowerCase() === "v") setTool("select");
-      else if (toolShortcut && event.key.toLowerCase() === "h") setTool("hand");
-      else if (toolShortcut && event.key.toLowerCase() === "t") setTool("text");
-      else if (event.key === "[") setWidth((value) => Math.max(1, value - 1));
-      else if (event.key === "]") setWidth((value) => Math.min(18, value + 1));
+      } else if (toolShortcut && event.key.toLowerCase() === "p") selectTool("pen");
+      else if (toolShortcut && event.key.toLowerCase() === "e") selectTool("eraser");
+      else if (toolShortcut && event.key.toLowerCase() === "h") selectTool("hand");
+      else if (toolShortcut && event.key.toLowerCase() === "t") selectTool("text");
+      else if (event.key === "[") setWidth((value) => (widthRef.current = Math.max(1, value - 1)));
+      else if (event.key === "]") setWidth((value) => (widthRef.current = Math.min(18, value + 1)));
       else if (event.key === "0") fitBoard();
       else if (event.key === "+" || event.key === "=") zoomBy(1.15);
       else if (event.key === "-") zoomBy(1 / 1.15);
@@ -1432,19 +1456,19 @@ function App() {
   }
 
   function beginPrimaryAction(point: Point, clientX: number, clientY: number, pointerType: string) {
-    if (tool === "pen") {
+    if (toolRef.current === "pen") {
       currentStroke.current = {
         id: crypto.randomUUID(),
         color,
-        width,
+        width: widthRef.current,
         pointerType,
         points: [point],
       };
       setSelection(new Set());
-    } else if (tool === "eraser") {
+    } else if (toolRef.current === "eraser") {
       eraseOrigin.current = boardRef.current;
       eraseAt(point.x, point.y);
-    } else if (tool === "select") {
+    } else if (toolRef.current === "select") {
       const bounds = selectedContentBounds(boardRef.current, selectionRef.current);
       if (bounds && point.x >= bounds.x && point.x <= bounds.x + bounds.width && point.y >= bounds.y && point.y <= bounds.y + bounds.height) {
         beginSelectionTransform("move", point);
@@ -1453,7 +1477,7 @@ function App() {
         selectionOrigin.current = point;
         setSelectionBox({ x: point.x, y: point.y, width: 0, height: 0 });
       }
-    } else if (tool === "hand") {
+    } else if (toolRef.current === "hand") {
       dragOrigin.current = {
         point: { ...point, x: clientX, y: clientY },
         view: viewRef.current,
@@ -1698,7 +1722,7 @@ function App() {
 
   async function saveBoard() {
     try {
-      const serialized = JSON.stringify(board);
+      const serialized = serializeBoard(board);
       if (isTauri()) {
         nativeWriteChain.current = nativeWriteChain.current
           .catch(() => undefined)
@@ -1848,6 +1872,8 @@ function App() {
     pasteText(await navigator.clipboard.readText().catch(() => ""));
   }, [pasteFromTauri, insertImageBytes, pasteText]);
 
+  pasteFromClipboardRef.current = pasteFromClipboard;
+
   useEffect(() => {
     if (isTauri()) {
       const onKeyDown = (event: KeyboardEvent) => {
@@ -1936,7 +1962,7 @@ function App() {
     try {
       if (encryptionRequest.action === "save") {
         const saved = await invoke<boolean>("save_encrypted_board_dialog", {
-          boardJson: JSON.stringify(board),
+          boardJson: serializeBoard(board),
           password: encryptionPassword,
           defaultName: defaultExternalName(board.title || defaultBoardTitle(), ".whiteboard.enc"),
         });
@@ -2385,7 +2411,7 @@ function App() {
               setPracticeOpen(true);
               setRecognitionOpen(false);
               setSettingsOpen(false);
-              setTool("pen");
+            selectTool("pen");
             }}
             pressed={practiceOpen}
           ><Student /></IconButton>
@@ -2429,6 +2455,7 @@ function App() {
           onPointerMove={movePointer}
           onPointerUp={endPointer}
           onPointerCancel={cancelPointer}
+          onAuxClick={(event) => event.preventDefault()}
           onWheel={handleWheel}
           onContextMenu={(event) => event.preventDefault()}
           data-scale={view.scale}
@@ -2665,14 +2692,14 @@ function App() {
             event.preventDefault();
             const tools: Tool[] = ["select", "pen", "eraser", "hand", "text"];
             const index = tools.indexOf(tool);
-            setTool(tools[(index + (event.deltaY > 0 ? 1 : -1) + tools.length) % tools.length]);
+            selectTool(tools[(index + (event.deltaY > 0 ? 1 : -1) + tools.length) % tools.length]);
           }}
         >
-          <ToolButton tool="select" active={tool === "select"} label="Select (V)" onClick={setTool}><Selection /></ToolButton>
-          <ToolButton tool="pen" active={tool === "pen"} label="Pen (P)" onClick={setTool}><PencilSimple /></ToolButton>
-          <ToolButton tool="eraser" active={tool === "eraser"} label="Eraser (E)" onClick={setTool}><Eraser /></ToolButton>
-          <ToolButton tool="hand" active={tool === "hand"} label="Pan (H)" onClick={setTool}><Hand /></ToolButton>
-          <ToolButton tool="text" active={tool === "text"} label="Text (T)" onClick={setTool}><TextT /></ToolButton>
+          <ToolButton tool="select" active={tool === "select"} label="Select (A)" onClick={selectTool}><Selection /></ToolButton>
+          <ToolButton tool="pen" active={tool === "pen"} label="Pen (P)" onClick={selectTool}><PencilSimple /></ToolButton>
+          <ToolButton tool="eraser" active={tool === "eraser"} label="Eraser (Shift)" onClick={selectTool}><Eraser /></ToolButton>
+          <ToolButton tool="hand" active={tool === "hand"} label="Pan (S)" onClick={selectTool}><Hand /></ToolButton>
+          <ToolButton tool="text" active={tool === "text"} label="Text (D)" onClick={selectTool}><TextT /></ToolButton>
         </div>
         <div className="dock-separator" />
         <div className="color-list" aria-label="Ink color">
@@ -2691,8 +2718,14 @@ function App() {
         </div>
         <label className="width-control">
           <span>Size</span>
-          <input type="range" min="1" max="18" value={width} onChange={(event) => setWidth(Number(event.target.value))} />
-          <output>{width}</output>
+          <input ref={widthInputRef} aria-label="Brush size" type="number" min="1" max="18" value={width} onInput={(event) => {
+            const value = event.currentTarget.valueAsNumber;
+            if (Number.isFinite(value)) {
+              widthRef.current = Math.min(18, Math.max(1, value));
+              setWidth(widthRef.current);
+              localStorage.setItem(UI_STORAGE_KEY, JSON.stringify({ ...loadUiPreferences(), width: widthRef.current }));
+            }
+          }} onBlur={() => pasteSinkRef.current?.focus({ preventScroll: true })} />
         </label>
         <div className="dock-separator" />
         <IconButton label="Undo (Ctrl+Z)" onClick={undo} disabled={!undoStack.current.length}><ArrowCounterClockwise /></IconButton>
