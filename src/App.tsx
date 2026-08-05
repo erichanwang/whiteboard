@@ -1380,13 +1380,6 @@ function App() {
       } else if (!event.repeat && event.key.toLowerCase() === "m") {
         event.preventDefault();
         toggleMousepadCapture();
-      } else if (toolShortcut && event.key === "Shift") selectTool("eraser");
-      else if (toolShortcut && event.key.toLowerCase() === "a") selectTool("select");
-      else if (toolShortcut && event.key.toLowerCase() === "s") selectTool("hand");
-      else if (toolShortcut && event.key.toLowerCase() === "d") selectTool("text");
-      else if (toolShortcut && event.key.toLowerCase() === "v") {
-        event.preventDefault();
-        void pasteFromClipboardRef.current().catch((error) => window.alert(`Could not paste: ${String(error)}`));
       } else if (!event.repeat && canvasHover.current && !keyboardPointerAction.current && !currentStroke.current && !dragOrigin.current && !selectionOrigin.current
         && [...inputBindings.leftKeys, ...inputBindings.middleKeys, ...inputBindings.rightKeys].includes(event.key)) {
         event.preventDefault();
@@ -1409,6 +1402,13 @@ function App() {
           setSelectionBox({ x: hover.point.x, y: hover.point.y, width: 0, height: 0 });
         }
         redraw();
+      } else if (toolShortcut && event.key === "Shift") selectTool("eraser");
+      else if (toolShortcut && event.key.toLowerCase() === "a") selectTool("select");
+      else if (toolShortcut && event.key.toLowerCase() === "s") selectTool("hand");
+      else if (toolShortcut && event.key.toLowerCase() === "d") selectTool("text");
+      else if (toolShortcut && event.key.toLowerCase() === "v") {
+        event.preventDefault();
+        void pasteFromClipboardRef.current().catch((error) => window.alert(`Could not paste: ${String(error)}`));
       } else if (toolShortcut && event.key.toLowerCase() === "p") selectTool("pen");
       else if (toolShortcut && event.key.toLowerCase() === "e") selectTool("eraser");
       else if (toolShortcut && event.key.toLowerCase() === "h") selectTool("hand");
