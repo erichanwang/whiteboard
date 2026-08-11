@@ -998,6 +998,24 @@ try {
   const viewXAfterPan = Number(await canvas.getAttribute("data-view-x"));
   if (viewXAfterPan === viewXBeforePan) throw new Error("Middle-button drag did not pan the board.");
 
+  const strokesBeforeLostCapture = Number(await canvas.getAttribute("data-stroke-count"));
+  const viewBeforeLostCapture = Number(await canvas.getAttribute("data-view-x"));
+  await page.mouse.move(box.x + 420, box.y + 280);
+  await page.mouse.down({ button: "middle" });
+  await canvas.dispatchEvent("lostpointercapture", { pointerId: 1, pointerType: "mouse", bubbles: true });
+  await page.mouse.move(box.x + 470, box.y + 310, { steps: 4 });
+  await page.mouse.up({ button: "middle" });
+  if (Number(await canvas.getAttribute("data-view-x")) !== viewBeforeLostCapture) {
+    throw new Error("Lost pointer capture left middle-button pan active.");
+  }
+  await page.mouse.move(box.x + 360, box.y + 240);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 400, box.y + 270, { steps: 4 });
+  await page.mouse.up();
+  if (Number(await canvas.getAttribute("data-stroke-count")) !== strokesBeforeLostCapture + 1) {
+    throw new Error("Lost middle-button capture blocked later drawing.");
+  }
+
   await page.keyboard.press("a");
   if ((await page.getByRole("button", { name: "Select (A)" }).getAttribute("aria-pressed")) !== "true") throw new Error("A did not select the select tool.");
   await page.keyboard.press("s");

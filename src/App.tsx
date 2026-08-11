@@ -2455,6 +2455,7 @@ function App() {
           onPointerMove={movePointer}
           onPointerUp={endPointer}
           onPointerCancel={cancelPointer}
+          onLostPointerCapture={cancelPointer}
           onAuxClick={(event) => event.preventDefault()}
           onWheel={handleWheel}
           onContextMenu={(event) => event.preventDefault()}

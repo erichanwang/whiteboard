@@ -12,6 +12,15 @@ import { chromium } from "playwright";
 //             fresh each frame (paintLayerCache).
 // Both draw into a real Canvas2D context in headless Chromium so the numbers
 // reflect actual browser rasterization cost, not a synthetic proxy.
+//
+// Earlier versions of this file timed 8 "before" frames against 60 "after"
+// frames and reported only the mean, which hid two things: the after path's
+// one-time cache-build cost amortized over many more frames than the before
+// path ever got, and a single mean cannot show whether a size's timings are
+// stable or dominated by an outlier. This version runs the same frame count
+// for both paths at every size and reports p50/p99 so both effects are
+// visible in the numbers instead of averaged away.
+const REPS = { 1_000: 300, 10_000: 300, 50_000: 100, 100_000: 60 };
 
 const browser = await chromium.launch({ executablePath: "/usr/bin/google-chrome", headless: true });
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
@@ -19,8 +28,13 @@ const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 try {
   await page.goto("http://127.0.0.1:1420", { waitUntil: "networkidle" });
 
-  const results = await page.evaluate(async () => {
+  const results = await page.evaluate(async (repsBySize) => {
     const { drawBoard, drawGrid, createLayerCache, paintLayerCache } = await import("/src/board.ts");
+
+    const percentile = (sorted, p) => {
+      const index = Math.min(sorted.length - 1, Math.floor((p / 100) * sorted.length));
+      return sorted[index];
+    };
 
     let seed = 5;
     const random = () => {
@@ -50,16 +64,11 @@ try {
       })),
     }));
 
-    // A full repaint of 100k strokes is expensive and its cost is stable
-    // frame to frame (same work every time, no I/O), so a full repaint needs
-    // far fewer samples than a cheap blit to get a solid average - this is
-    // what keeps the "before" case from taking minutes per size.
-    const BEFORE_FRAMES = 8;
-    const AFTER_FRAMES = 60;
     const sizes = [1_000, 10_000, 50_000, 100_000];
     const report = [];
 
     for (const size of sizes) {
+      const reps = repsBySize[size];
       const strokes = makeStrokes(size);
 
       const canvas = document.createElement("canvas");
@@ -67,11 +76,11 @@ try {
       canvas.height = HEIGHT;
       const context = canvas.getContext("2d");
 
-      // "Before": full repaint every frame (grid + every visible strokes +
-      // the in-progress stroke), matching the pre-change drawFrame body.
+      // "Before": full repaint every frame (grid + every visible stroke +
+      // the in-progress stroke), matching the pre-cache drawFrame body.
       const live = { id: "live", color: "#161616", width: 3, pointerType: "pen", points: [{ x: WIDTH / 2, y: HEIGHT / 2, pressure: 0.5 }] };
-      let beforeTotal = 0;
-      for (let frame = 0; frame < BEFORE_FRAMES; frame += 1) {
+      const beforeSamples = [];
+      for (let frame = 0; frame < reps; frame += 1) {
         live.points = [...live.points, {
           x: live.points[live.points.length - 1].x + (random() - 0.5) * 8,
           y: live.points[live.points.length - 1].y + (random() - 0.5) * 8,
@@ -84,18 +93,20 @@ try {
         drawGrid(context, visibleBounds, theme, view.scale);
         drawBoard(context, strokes, [], [], theme, new Set(), false, true, visibleBounds);
         drawBoard(context, [live], [], [], theme);
-        beforeTotal += performance.now() - start;
+        beforeSamples.push(performance.now() - start);
       }
-      const beforeMsPerFrame = beforeTotal / BEFORE_FRAMES;
 
       // "After": same scene, but the committed layer goes through
       // paintLayerCache. The stroke array and view never change across these
       // frames (exactly like drawing one stroke in the real app), so after
       // the first frame's one-time paint, every subsequent frame just blits.
+      // Same rep count as "before" above, so the one-time cost gets exactly
+      // as many chances to be amortized (or to show up as an outlier) as
+      // the before path gets total frames.
       const layerCache = createLayerCache();
       const live2 = { id: "live", color: "#161616", width: 3, pointerType: "pen", points: [{ x: WIDTH / 2, y: HEIGHT / 2, pressure: 0.5 }] };
-      let afterTotal = 0;
-      for (let frame = 0; frame < AFTER_FRAMES; frame += 1) {
+      const afterSamples = [];
+      for (let frame = 0; frame < reps; frame += 1) {
         live2.points = [...live2.points, {
           x: live2.points[live2.points.length - 1].x + (random() - 0.5) * 8,
           y: live2.points[live2.points.length - 1].y + (random() - 0.5) * 8,
@@ -108,21 +119,31 @@ try {
           drawBoard(offscreenContext, strokes, [], [], theme, new Set(), false, true, visibleBounds);
         });
         drawBoard(context, [live2], [], [], theme);
-        afterTotal += performance.now() - start;
+        afterSamples.push(performance.now() - start);
       }
-      const afterMsPerFrame = afterTotal / AFTER_FRAMES;
 
-      report.push({ size, beforeMsPerFrame, afterMsPerFrame });
+      const beforeSorted = [...beforeSamples].sort((a, b) => a - b);
+      const afterSorted = [...afterSamples].sort((a, b) => a - b);
+
+      report.push({
+        size,
+        reps,
+        beforeP50: percentile(beforeSorted, 50),
+        beforeP99: percentile(beforeSorted, 99),
+        afterP50: percentile(afterSorted, 50),
+        afterP99: percentile(afterSorted, 99),
+      });
     }
 
     return report;
-  });
+  }, REPS);
 
-  console.log("Render frame-time benchmark (headless Chromium, drawing one stroke while the board is static):");
-  console.log("strokes\tbefore(ms/frame)\tafter(ms/frame)\tspeedup");
+  console.log("Render frame-time benchmark (headless Chromium, drawing one stroke while the board is static).");
+  console.log("Same rep count used for before and after at each size; p50/p99 in milliseconds per frame.");
+  console.log("strokes\treps\tbefore p50\tbefore p99\tafter p50\tafter p99\tp50 speedup");
   for (const row of results) {
     console.log(
-      `${row.size}\t${row.beforeMsPerFrame.toFixed(3)}\t\t\t${row.afterMsPerFrame.toFixed(3)}\t\t${(row.beforeMsPerFrame / row.afterMsPerFrame).toFixed(1)}x`,
+      `${row.size}\t${row.reps}\t${row.beforeP50.toFixed(3)}\t\t${row.beforeP99.toFixed(3)}\t\t${row.afterP50.toFixed(3)}\t\t${row.afterP99.toFixed(3)}\t\t${(row.beforeP50 / row.afterP50).toFixed(1)}x`,
     );
   }
 } finally {
