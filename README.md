@@ -103,7 +103,7 @@ npm run test:e2e
 
 ### Spatial index for hit-testing and viewport culling
 
-Large boards used to hit-test erasing and cull off-screen strokes with a linear scan of every stroke in `src/board.ts`. `eraseStrokesAt` and `drawBoard`'s viewport culling (and the rectangular-selection helper `strokesIntersectingBounds`) now narrow that scan first through a uniform-grid spatial index (`queryStrokeIndices`, cell size 512, cached per strokes array so repeated queries against an unchanged board reuse the same grid). Every consumer still runs the exact same narrow-phase check (`pointHitsStroke`, `overlapsBounds`, `intersectsBounds`) the old linear scan used, so the index only prunes candidates — it never changes which strokes match.
+Large boards used to hit-test erasing and cull off-screen strokes with a linear scan of every stroke in `src/board.ts`. `eraseStrokesAt` and `drawBoard`'s viewport culling (and the rectangular-selection helper `strokesIntersectingBounds`) now narrow that scan first through a uniform-grid spatial index (`queryStrokeIndices`, cell size 512, cached per strokes array so repeated queries against an unchanged board reuse the same grid). Every consumer still runs the exact same narrow-phase check (`pointHitsStroke`, `overlapsBounds`, `intersectsBounds`) the old linear scan used, so the index only prunes candidates; it never changes which strokes match.
 
 Run the equivalence test (asserts the spatial index returns exactly the same strokes as a linear scan, over 300 randomized point/bounds/viewport queries plus edge cases):
 
