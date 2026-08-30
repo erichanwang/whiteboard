@@ -395,7 +395,23 @@ fn write_private_new_file(path: &Path, contents: &[u8]) -> io::Result<()> {
         .open(path)?;
     #[cfg(unix)]
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    file.write_all(contents)
+    file.write_all(contents)?;
+    // A rename can be reordered before the writes it follows unless the file
+    // itself is durable first: without this, power loss between rename and
+    // its own fsync can leave the destination pointing at a zero-length or
+    // truncated inode even though the code "looked" atomic.
+    file.sync_all()
+}
+
+// Renaming a temp file over the destination is only atomic from the point of
+// view of a process that stays up. The directory entry update is itself a
+// write that the filesystem can keep buffered; on power loss before it is
+// flushed, the rename can be lost or torn, silently resurrecting the old
+// file or leaving neither name resolvable. fsync-ing the directory after the
+// rename is what makes the new name durable.
+#[cfg(unix)]
+fn sync_directory(directory: &Path) -> io::Result<()> {
+    fs::File::open(directory)?.sync_all()
 }
 
 fn write_board_atomically(
@@ -411,8 +427,12 @@ fn write_board_atomically(
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let temporary = directory.join(format!(".{board_id}-{suffix}.tmp"));
-    let result = write_private_new_file(&temporary, contents)
-        .and_then(|_| fs::rename(&temporary, destination));
+    let result = write_private_new_file(&temporary, contents).and_then(|_| {
+        fs::rename(&temporary, destination)?;
+        #[cfg(unix)]
+        sync_directory(directory)?;
+        Ok(())
+    });
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
@@ -1125,6 +1145,7 @@ mod tests {
         io::{Cursor, Read, Write},
         net::TcpListener,
         path::PathBuf,
+        process::Command,
         thread,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
@@ -1626,6 +1647,77 @@ mod tests {
             .is_file());
 
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    // A rename "looks" atomic from inside a single process, but that alone
+    // does not survive a crash: the write to the temp file and the directory
+    // entry update from the rename can both still be sitting in the page
+    // cache when power is lost, resurrecting a stale or zero-length board.
+    // strace lets this test observe the actual syscalls a save performs and
+    // assert the durability order directly, rather than only asserting on
+    // the end state a healthy process sees.
+    #[test]
+    #[cfg(unix)]
+    fn atomic_save_fsyncs_the_temp_file_before_rename_and_the_directory_after_it() {
+        if Command::new("strace").arg("-V").output().is_err() {
+            eprintln!("strace is not installed; skipping durability syscall trace");
+            return;
+        }
+
+        let trace_path = std::env::temp_dir().join(format!(
+            "whiteboard-fsync-trace-{}-{}.log",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let status = Command::new("strace")
+            .args(["-f", "-e", "trace=fsync,fdatasync,rename,renameat,renameat2", "-o"])
+            .arg(&trace_path)
+            .args([
+                "cargo",
+                "test",
+                "--package",
+                "whiteboard",
+                "--lib",
+                "tests::private_new_files_reject_symlinks_and_atomic_save_replaces_destination",
+                "--",
+                "--exact",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let trace = fs::read_to_string(&trace_path).unwrap();
+        fs::remove_file(&trace_path).ok();
+
+        // Isolate the syscalls made by the process that actually performed
+        // the save (strace -f traces every forked child, including cargo's
+        // own bookkeeping fsyncs, which use different pids).
+        let pid = trace
+            .lines()
+            .find(|line| line.contains("rename("))
+            .and_then(|line| line.split_whitespace().next())
+            .expect("the save must issue a rename syscall");
+        let calls: Vec<&str> = trace
+            .lines()
+            .filter(|line| {
+                line.starts_with(pid) && (line.contains("fsync(") || line.contains("rename("))
+            })
+            .collect();
+
+        assert_eq!(
+            calls.len(),
+            3,
+            "expected exactly [fsync(temp), rename, fsync(dir)], got: {calls:#?}"
+        );
+        assert!(
+            calls[0].contains("fsync("),
+            "the temp file must be fsynced before the rename so its data is durable first: {calls:#?}"
+        );
+        assert!(calls[1].contains("rename("), "unexpected call order: {calls:#?}");
+        assert!(
+            calls[2].contains("fsync("),
+            "the parent directory must be fsynced after the rename or the new name is not durable: {calls:#?}"
+        );
     }
 
     #[test]
