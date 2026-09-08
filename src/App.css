@@ -310,9 +310,8 @@ button:disabled { opacity: 0.34; cursor: default; }
 .color-swatch.selected { box-shadow: 0 0 0 2px var(--accent); }
 .color-swatch svg { width: 15px; height: 15px; }
 
-.width-control { display: grid; grid-template-columns: auto 82px 20px; align-items: center; gap: 6px; padding: 0 5px; font-size: 11px; color: var(--muted); }
-.width-control input { width: 82px; accent-color: var(--accent); }
-.width-control output { color: var(--chrome-text); font-variant-numeric: tabular-nums; }
+.width-control { display: grid; grid-template-columns: auto 52px; align-items: center; gap: 6px; padding: 0 5px; font-size: 11px; color: var(--muted); }
+.width-control input { width: 52px; color: var(--chrome-text); background: transparent; border: 1px solid var(--chrome-border); border-radius: 5px; padding: 3px 5px; font-variant-numeric: tabular-nums; }
 
 .zoom-control {
   position: absolute;
@@ -504,8 +503,8 @@ button:disabled { opacity: 0.34; cursor: default; }
   .save-state { display: none; }
   .topbar .text-button { font-size: 0; gap: 0; }
   .topbar .text-button svg { margin: 0; }
-  .width-control { grid-template-columns: auto 64px 18px; }
-  .width-control input { width: 64px; }
+  .width-control { grid-template-columns: auto 48px; }
+  .width-control input { width: 48px; }
 }
 
 @media (max-width: 640px) {

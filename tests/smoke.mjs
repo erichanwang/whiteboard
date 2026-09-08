@@ -998,6 +998,48 @@ try {
   const viewXAfterPan = Number(await canvas.getAttribute("data-view-x"));
   if (viewXAfterPan === viewXBeforePan) throw new Error("Middle-button drag did not pan the board.");
 
+  const strokesBeforeLostCapture = Number(await canvas.getAttribute("data-stroke-count"));
+  const viewBeforeLostCapture = Number(await canvas.getAttribute("data-view-x"));
+  await page.mouse.move(box.x + 420, box.y + 280);
+  await page.mouse.down({ button: "middle" });
+  await canvas.dispatchEvent("lostpointercapture", { pointerId: 1, pointerType: "mouse", bubbles: true });
+  await page.mouse.move(box.x + 470, box.y + 310, { steps: 4 });
+  await page.mouse.up({ button: "middle" });
+  if (Number(await canvas.getAttribute("data-view-x")) !== viewBeforeLostCapture) {
+    throw new Error("Lost pointer capture left middle-button pan active.");
+  }
+  await page.mouse.move(box.x + 360, box.y + 240);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 400, box.y + 270, { steps: 4 });
+  await page.mouse.up();
+  if (Number(await canvas.getAttribute("data-stroke-count")) !== strokesBeforeLostCapture + 1) {
+    throw new Error("Lost middle-button capture blocked later drawing.");
+  }
+
+  await page.keyboard.press("a");
+  if ((await page.getByRole("button", { name: "Select (A)" }).getAttribute("aria-pressed")) !== "true") throw new Error("A did not select the select tool.");
+  await page.keyboard.press("s");
+  if ((await page.getByRole("button", { name: "Pan (S)" }).getAttribute("aria-pressed")) !== "true") throw new Error("S did not select the pan tool.");
+  await page.keyboard.press("d");
+  if ((await page.getByRole("button", { name: "Text (D)" }).getAttribute("aria-pressed")) !== "true") throw new Error("D did not select the text tool.");
+  await page.keyboard.press("Shift");
+  if ((await page.getByRole("button", { name: "Eraser (Shift)" }).getAttribute("aria-pressed")) !== "true") throw new Error("Shift did not select the eraser tool.");
+  const sizeField = page.getByLabel("Brush size");
+  await sizeField.fill("12");
+  if (await sizeField.inputValue() !== "12") throw new Error("Brush size cannot be entered directly.");
+  await page.waitForTimeout(50);
+  if (JSON.parse(await page.evaluate(() => localStorage.getItem("whiteboard.ui.v1"))).width !== 12) throw new Error("Brush size did not update immediately.");
+  const strokesBeforeSizeBinding = Number(await canvas.getAttribute("data-stroke-count"));
+  await page.mouse.move(box.x + 300, box.y + 300);
+  await page.keyboard.down("z");
+  await page.mouse.move(box.x + 330, box.y + 330, { steps: 3 });
+  await page.keyboard.up("z");
+  await page.waitForTimeout(500);
+  const sizedStroke = await page.evaluate(() => JSON.parse(localStorage.getItem("whiteboard.document.v1")).strokes.at(-1));
+  if (Number(await canvas.getAttribute("data-stroke-count")) !== strokesBeforeSizeBinding + 1 || sizedStroke.width !== 12) {
+    throw new Error(`Z did not draw with the selected brush size: ${JSON.stringify({ before: strokesBeforeSizeBinding, after: Number(await canvas.getAttribute("data-stroke-count")), width: sizedStroke?.width })}`);
+  }
+
   await page.getByRole("button", { name: "Reset zoom to 100%" }).click();
   await page.mouse.move(box.x + 165, box.y + 165);
   await page.mouse.down({ button: "right" });
@@ -1037,7 +1079,7 @@ try {
   if (!(await page.getByRole("button", { name: "Hide grid" }).isVisible())) throw new Error("New board did not keep the grid setting.");
   await page.locator(".tool-group").hover();
   await page.mouse.wheel(0, 40);
-  await page.waitForFunction(() => document.querySelector('[aria-label="Eraser (E)"]')?.getAttribute("aria-pressed") === "true");
+  await page.waitForFunction(() => document.querySelector('[aria-label="Eraser (Shift)"]')?.getAttribute("aria-pressed") === "true");
   await page.mouse.wheel(0, -40);
   await page.waitForFunction(() => document.querySelector('[aria-label="Pen (P)"]')?.getAttribute("aria-pressed") === "true");
 
@@ -1132,7 +1174,7 @@ try {
 
   await page.getByRole("button", { name: "Save to Board Library" }).click();
 
-  await page.getByRole("button", { name: "Text (T)" }).click();
+  await page.getByRole("button", { name: "Text (D)" }).click();
   await page.mouse.click(box.x + 520, box.y + 210);
   const textEditor = page.getByRole("dialog", { name: "Add text" });
   await textEditor.getByLabel("Text content").fill("Typed note");
@@ -1290,7 +1332,7 @@ try {
   if (await handwritingToggle.isDisabled()) throw new Error("Experimental handwriting did not unlock after five guided samples per lowercase letter.");
   await handwritingToggle.click();
   await page.getByRole("button", { name: "Close settings" }).click();
-  await page.getByRole("button", { name: "Text (T)" }).click();
+  await page.getByRole("button", { name: "Text (D)" }).click();
   await page.mouse.click(restoredBox.x + 420, restoredBox.y + 180);
   const handwritingEditor = page.getByRole("dialog", { name: "Add text" });
   await handwritingEditor.getByLabel("Text content").fill("abc");
