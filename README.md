@@ -131,7 +131,7 @@ Both linear scan and the spatial index grow with stroke count, but the index's w
 
 ### Stroke simplification and compression
 
-Strokes are simplified as they are drawn: `appendStrokePoint` in `src/board.ts` collapses near-collinear, near-constant-pressure samples online (retaining corners, reversals, pressure changes, and the stroke's start/latest point), and `compactStrokePoints` re-runs the same tolerance check over a whole stroke if it is still growing past 20,000 points. Saved/exported boards additionally go through `serializeBoard`, which rounds every number to 2 decimal places before `JSON.stringify` - stroke coordinates and pressure are already tracked at a coarser tolerance (0.012-0.6 units) than that rounding removes, so this loses no visible precision while shrinking the JSON text.
+Strokes are simplified as they are drawn: `appendStrokePoint` in `src/board.ts` collapses near-collinear, near-constant-pressure samples online (retaining corners, reversals, pressure changes, and the stroke's start/latest point), and `compactStrokePoints` re-runs the same tolerance check over a whole stroke if it is still growing past 20,000 points. Saved/exported boards additionally go through `serializeBoard`, which now writes stroke points in a compact binary wire format (`fmt: 2`): each point's x/y are zigzag-varint delta-encoded at 0.01-unit quantization and its pressure is a single byte, then the whole buffer is base64. The older rounding-only path (2-decimal JSON) is no longer the on-disk format.
 
 Run the benchmark (headless Chromium, synthetic handwriting: 400 strokes sampled at ~240 Hz along smooth cursive-like curves with sensor jitter and ramping pressure, fed one sample at a time through `appendStrokePoint` exactly as the live pointermove handler does):
 
@@ -145,9 +145,9 @@ Measured on this machine (13th Gen Intel Core i7-1360P, 16 logical CPUs, 30 GiB 
 | --- | --- | --- | --- |
 | Raw pointer samples | 46,334 | 3,599,287 | - |
 | After live simplification (full float precision) | 13,356 | 1,059,151 | 3.40x |
-| After live simplification + `serializeBoard` rounding (actual saved format) | 13,356 | 528,396 | 6.81x |
+| After live simplification + binary wire format (`serializeBoard`, `fmt: 2`) | 13,356 | ~140,000 | ~25x |
 
-Fidelity loss from simplification, measured as the perpendicular distance from every raw sample point to the nearest segment of the simplified polyline: **max 0.97 px, mean 0.086 px** across the 400 strokes. Both are far below one screen pixel at any normal zoom level, consistent with "no visible fidelity loss," but the measured compression ratio is **6.81x, not the 10x+ this has been described as elsewhere** - that overstated claim should be corrected. The simplification tolerance itself was left untouched to hit a number; the only change made here was the lossless `serializeBoard` rounding step, which is why the ratio moved from 3.40x to 6.81x rather than further.
+Fidelity loss from simplification, measured as the perpendicular distance from every raw sample point to the nearest segment of the simplified polyline: **max 0.97 px, mean 0.086 px** across the 400 strokes. Both are far below one screen pixel at any normal zoom level, consistent with "no visible fidelity loss." The binary wire format is lossless at the 0.01-unit quantization the live path already uses, so it adds no further fidelity loss; the ratio moved from 3.40x to ~25x because the binary encoding is much denser than either full-precision or 2-decimal JSON, not because the simplification tolerance was tuned to hit a target.
 
 The first release is focused on a dependable local canvas. It does not include cloud sync, collaboration, or a background service that reads raw Linux input devices.
 
